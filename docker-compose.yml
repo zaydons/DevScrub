@@ -1,0 +1,89 @@
+services:
+  security-scanner:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    image: devscrub-scanner:latest
+    container_name: security-scanner
+    labels:
+      - "com.devscrub.description=Security Scanner with Code Analysis"
+      - "com.devscrub.version=0.0.3"
+      - "com.devscrub.maintainer=Sal Zaydon<devscrub@zaydon.email>"
+    volumes:
+      - ..:/scan:ro
+      - ./security-reports:/reports
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - SCAN_FORMAT=all
+      - SCAN_SEVERITY=
+    command: --format all
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+        reservations:
+          memory: 1G
+          cpus: '1.0'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    
+  scanner-oneshot:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    image: devscrub-scanner:latest
+    labels:
+      - "com.devscrub.description=Security Scanner for One-time Scans"
+      - "com.devscrub.version=0.0.3"
+      - "com.devscrub.maintainer=Sal Zaydon<devscrub@zaydon.email>"
+    volumes:
+      - ..:/scan:ro
+      - ./security-reports:/reports
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: --format all
+    profiles:
+      - oneshot
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+        reservations:
+          memory: 1G
+          cpus: '1.0'
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s 

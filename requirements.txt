@@ -1,0 +1,6 @@
+# Universal Security Scanner Requirements
+bandit>=1.7.0
+pip-audit>=2.6.0
+semgrep>=1.0.0
+pylint>=3.0.0
+deepsecrets>=1.4.0 

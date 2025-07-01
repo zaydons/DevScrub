@@ -1,0 +1,72 @@
+name: Build, Tag, and Push Docker Image
+
+on:
+  push:
+    branches:
+      - '**'
+  release:
+    types: [published]
+
+jobs:
+  build-tag-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version
+        id: get_version
+        run: |
+          VERSION=$(cat VERSION | tr -d ' \n')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Set Docker tags
+        id: set_tags
+        run: |
+          BRANCH=${GITHUB_REF##*/}
+          TAGS="ghcr.io/${{ github.repository_owner }}/devscrub:$BRANCH"
+          if [ "$BRANCH" = "main" ]; then
+            TAGS="$TAGS,ghcr.io/${{ github.repository_owner }}/devscrub:latest"
+          fi
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAGS="$TAGS,ghcr.io/${{ github.repository_owner }}/devscrub:${{ steps.get_version.outputs.version }}"
+          fi
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.set_tags.outputs.tags }}
+
+      - name: Set up git for tag push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+      - name: Force-update branch tag
+        run: |
+          BRANCH=${GITHUB_REF##*/}
+          git tag -f "$BRANCH"
+          git push origin "$BRANCH" --force
+
+      - name: Force-update latest tag (main only)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git tag -f latest
+          git push origin latest --force 
