@@ -176,7 +176,7 @@ class SecurityScanner:  # pylint: disable=R0902,R0903
             'scan_info': {
                 'timestamp': datetime.now().isoformat(),
                 'target_directory': str(self.target_dir),
-                'scanner_version': '0.0.3'
+                'scanner_version': '0.0.4'
             },
             'project_types': {k: [str(p) for p in v] for k, v in project_types.items()},
             'tool_availability': self.python_scanner.tools,  # All scanners share the same tools
@@ -488,25 +488,69 @@ class SecurityScanner:  # pylint: disable=R0902,R0903
         for grype_scan in vuln_results.get('grype', []):
             if not isinstance(grype_scan, dict):
                 continue
-            if 'matches' in grype_scan:
-                for match in grype_scan['matches']:
+            
+            if 'data' in grype_scan and 'matches' in grype_scan['data']:
+                matches = grype_scan['data']['matches']
+                
+                for match in matches:
                     if not isinstance(match, dict):
                         continue
+                    
+                    # Map Grype severity to standard severity levels
+                    grype_severity = match.get('vulnerability', {}).get('severity', 'medium').lower()
+                    severity = self._map_grype_severity(grype_severity)
+                    
+                    # Extract file path more robustly
+                    artifact = match.get('artifact', {})
+                    locations = artifact.get('locations', [])
+                    file_path = ''
+                    if locations and isinstance(locations, list) and len(locations) > 0:
+                        file_path = locations[0].get('path', '')
+                    
+                    # Extract package information
+                    artifact = match.get('artifact', {})
+                    package_name = artifact.get('name', 'Unknown Package')
+                    package_version = artifact.get('version', 'Unknown Version')
+                    
+                    # Create more informative title and description
+                    vuln_id = match.get('vulnerability', {}).get('id', 'Unknown')
+                    vuln_description = match.get('vulnerability', {}).get('description', '')
+                    
+                    title = f"Vulnerability: {vuln_id} in {package_name} {package_version}"
+                    description = f"{vuln_description}\n\nPackage: {package_name} {package_version}"
+                    if file_path:
+                        description += f"\nFile: {file_path}"
+                    
+                    # Extract dataSource URL for the vulnerability
+                    data_source_url = match.get('vulnerability', {}).get('dataSource', '')
+                    
                     findings.append({
-                        'title': f"Vulnerability: {match.get('vulnerability', {}).get('id', 'Unknown')}",  # pylint: disable=C0301
-                        'description': match.get('vulnerability', {}).get('description', ''),
-                        'severity': match.get('vulnerability', {}).get('severity', 'medium').lower(),  # pylint: disable=C0301
+                        'title': title,
+                        'description': description,
+                        'severity': severity,
                         'tool': 'Grype',
-                        'file_path': match.get('artifact', {}).get('locations', [{}])[0].get('path', ''),  # pylint: disable=C0301
+                        'file_path': file_path,
                         'line_number': None,
                         'line_range': [],
                         'confidence': 'high',
                         'cwe': match.get('vulnerability', {}).get('cwe', ''),
                         'cve': match.get('vulnerability', {}).get('id', ''),
-                        'file_content': None
+                        'file_content': None,
+                        'grype_data_source': data_source_url
                     })
 
         return findings
+
+    def _map_grype_severity(self, grype_severity: str) -> str:
+        """Map Grype severity levels to standard severity levels"""
+        severity_mapping = {
+            'critical': 'critical',
+            'high': 'high',
+            'medium': 'medium',
+            'low': 'low',
+            'negligible': 'info'
+        }
+        return severity_mapping.get(grype_severity, 'medium')
 
     def _extract_shell_findings(self) -> List[Dict[str, Any]]:
         """Extract findings from shell scan results"""

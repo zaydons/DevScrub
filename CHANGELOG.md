@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.4] - 20250702
+
+### Fixed
+- **Grype findings now properly documented in HTML reports**: Fixed issue where Grype vulnerability findings were not being extracted and displayed in HTML reports
+
 ## [0.0.3] - 20250701
 
 ### Added

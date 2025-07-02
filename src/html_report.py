@@ -82,6 +82,11 @@ def _generate_documentation_links(finding: Dict[str, Any]) -> str:
             ruff_link = f"https://docs.astral.sh/ruff/rules/{rule_name}/"
             links.append(f'<div><a href="{ruff_link}" target="_blank" rel="noopener" class="doc-link" aria-label="Ruff Documentation">📖 Ruff: {ruff_code}</a></div>')
 
+    elif tool == "Grype":
+        grype_data_source = finding.get("grype_data_source")
+        if grype_data_source:
+            links.append(f'<div><a href="{html.escape(grype_data_source)}" target="_blank" rel="noopener" class="doc-link" aria-label="Vulnerability Advisory">🔗 Advisory (dataSource)</a></div>')
+
     if cwe:
         cwe_id = html.escape(str(cwe))
         if cwe_id.startswith("CWE-"):

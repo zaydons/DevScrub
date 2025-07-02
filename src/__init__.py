@@ -2,7 +2,7 @@
 DevScrub Security Scanner
 """
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"
 __author__ = "Sal Zaydon"
 __email__ = "devscrub@zaydon.email"
 
