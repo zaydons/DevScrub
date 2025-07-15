@@ -91,16 +91,36 @@ COPY --from=node-tools /usr/local/bin/yarn /usr/local/bin/
 COPY --from=node-tools /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=node-tools /usr/local/bin/eslint /usr/local/bin/
 
-# Install security tools
+# Install security tools with architecture detection
 RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin && \
     curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin && \
     curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin && \
-    curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin && \
-    curl -L https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64 -o /usr/local/bin/hadolint && \
-    chmod +x /usr/local/bin/hadolint && \
-    curl -sSfL https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz | tar -xJ && \
-    mv shellcheck-v0.10.0/shellcheck /usr/local/bin/ && \
-    rm -rf shellcheck-v0.10.0
+    curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+# Install hadolint with architecture detection
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        curl -L https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64 -o /usr/local/bin/hadolint; \
+    elif [ "$ARCH" = "aarch64" ]; then \
+        curl -L https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-arm64 -o /usr/local/bin/hadolint; \
+    else \
+        echo "Unsupported architecture: $ARCH" && exit 1; \
+    fi && \
+    chmod +x /usr/local/bin/hadolint
+
+# Install shellcheck with architecture detection
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        curl -sSfL https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz | tar -xJ && \
+        mv shellcheck-v0.10.0/shellcheck /usr/local/bin/ && \
+        rm -rf shellcheck-v0.10.0; \
+    elif [ "$ARCH" = "aarch64" ]; then \
+        curl -sSfL https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.aarch64.tar.xz | tar -xJ && \
+        mv shellcheck-v0.10.0/shellcheck /usr/local/bin/ && \
+        rm -rf shellcheck-v0.10.0; \
+    else \
+        echo "Unsupported architecture: $ARCH" && exit 1; \
+    fi
 
 # Install Python security tools
 RUN pip install --no-cache-dir \
