@@ -4,7 +4,7 @@ FROM alpine:3.22.0 AS base
 
 LABEL maintainer="Sal Zaydon<devscrub@zaydon.email>"
 LABEL description="Security Scanner with Code Analysis"
-LABEL version="0.0.3"
+LABEL version="0.0.5"
 LABEL org.opencontainers.image.source="https://github.com/zaydons/DevScrub"
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.vendor="DevScrub"

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.5] - 20250714
+
+### Added
+- **Multi-architecture Docker support**: Added support for both x86_64 (AMD64) and ARM64 architectures
+- **QEMU emulation support**: Enabled cross-platform builds using QEMU for ARM64 emulation on x86_64 runners
+
+### Changed
+- **Build performance**: Implemented GitHub Actions cache for faster builds
+
 ## [0.0.4] - 20250702
 
 ### Fixed
