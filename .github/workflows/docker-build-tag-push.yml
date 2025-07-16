@@ -48,6 +48,18 @@ jobs:
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
+      - name: Upload Trivy results for issue creation
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+          retention-days: 1
+      - name: Install Syft
+        run: |
+          echo "Installing Syft for SBOM generation..."
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          syft --version
       - name: Generate SBOM
         id: sbom
         run: |
@@ -85,6 +97,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      - name: Download Trivy results
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-results
+          path: ./
       - name: Create vulnerability issue
         id: create-issue
         run: |
@@ -97,6 +114,7 @@ jobs:
           if [ -f trivy-results.sarif ]; then
             VULN_DATA=$(jq '.runs[0].results' trivy-results.sarif)
           else
+            echo "Warning: trivy-results.sarif not found, using empty vulnerability data"
             VULN_DATA="[]"
           fi
           
