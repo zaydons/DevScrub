@@ -91,8 +91,8 @@ COPY --chown=scanner:scanner requirements.txt /app/
 COPY --chown=scanner:scanner VERSION /app/
 
 # Install Python requirements
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r /app/requirements.txt && \
+RUN python3.12 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    python3.12 -m pip install --no-cache-dir -r /app/requirements.txt && \
     rm -rf /root/.cache
 
 # Copy application code
