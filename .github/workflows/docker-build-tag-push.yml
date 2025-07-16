@@ -169,6 +169,18 @@ jobs:
           echo "Platform: ${{ matrix.platform }}"
           docker version
           docker buildx version
+          
+          # Test Dockerfile syntax
+          echo "🔍 Testing Dockerfile syntax..."
+          docker buildx build --dry-run --platform ${{ matrix.platform }} . || echo "Dockerfile syntax check failed"
+          
+          # Check if all required files exist
+          echo "📁 Checking required files..."
+          ls -la
+          echo "📄 Checking Dockerfile..."
+          head -20 Dockerfile
+          echo "📄 Checking requirements.txt..."
+          cat requirements.txt
       - name: Build and push
         id: build
         uses: docker/build-push-action@v5
@@ -187,6 +199,7 @@ jobs:
             GIT_REF=${{ needs.build-strategy.outputs.GIT_REF }}
           provenance: true
           sbom: true
+          outputs: type=docker,dest=/tmp/image-${{ matrix.platform }}.tar
       - name: Move cache
         run: |
           rm -rf /tmp/.buildx-cache
@@ -198,9 +211,22 @@ jobs:
           if [ "${{ steps.build.outcome }}" = "failure" ]; then
             echo "❌ Build failed for platform: ${{ matrix.platform }}"
             echo "Check the build logs above for details"
+            
+            # Try to get more detailed error information
+            echo "🔍 Attempting to get detailed build logs..."
+            docker buildx logs builder-$(echo ${{ matrix.platform }} | tr '/' '-') || echo "Could not retrieve build logs"
+            
             exit 1
           else
             echo "✅ Build completed successfully for platform: ${{ matrix.platform }}"
+            
+            # Verify the image was created
+            if [ -f "/tmp/image-${{ matrix.platform }}.tar" ]; then
+              echo "📦 Image artifact created: /tmp/image-${{ matrix.platform }}.tar"
+              ls -la /tmp/image-${{ matrix.platform }}.tar
+            else
+              echo "⚠️  No image artifact found"
+            fi
           fi
 
   verify:

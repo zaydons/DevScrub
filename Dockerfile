@@ -92,6 +92,7 @@ COPY --chown=scanner:scanner VERSION /app/
 # Install Python requirements
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r /app/requirements.txt && \
+    pip list && \
     rm -rf /root/.cache
 
 # Copy application code
@@ -107,6 +108,11 @@ ENV PYTHONPATH=/app
 ENV PATH="/usr/local/bin:${PATH}"
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+
+# Test Python installation
+RUN python --version && \
+    python -c "import sys; print('Python path:', sys.path)" && \
+    python -c "import src; print('✅ src module imported successfully')"
 
 # Switch to non-root user
 USER scanner
