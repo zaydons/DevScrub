@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.5] - 20250714
+
+### Added
+- **Smart build triggers**: Workflow only runs for relevant code changes (ignores docs, markdown, etc.)
+- **Parallel multi-architecture builds**: Builds for x86_64 and ARM64 in parallel using matrix jobs
+- **Advanced caching**: Uses GitHub Actions and registry cache for persistent, faster builds
+- **BuildKit cache mounts**: Dockerfile uses BuildKit cache mounts for pip, npm, and apk
+- **QEMU emulation support**: Enables cross-platform builds using QEMU for ARM64 emulation on x86_64 runners
+
+### Changed
+- **Python version**: Upgraded to Python 3.12.11 for all builds
+- **Dockerfile optimization**: Combined RUN commands, optimized tool installation, and leveraged multi-stage builds for better cache utilization
+- **Conditional multi-arch builds**: Only builds both architectures on main/release, single-arch for feature branches
+- **Manifest creation**: Multi-arch manifest is created and pushed for main/release
+- **Build performance**: Dramatically reduced build times for most scenarios
+
 ## [0.0.4] - 20250702
 
 ### Fixed
