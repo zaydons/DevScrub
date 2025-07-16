@@ -234,20 +234,29 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create and push manifest
         run: |
-          echo "Creating manifest..."
+          echo "Creating multi-architecture manifest..."
           BRANCH=${GITHUB_REF##*/}
           
-          # Get the digest of the built image
-          IMAGE_DIGEST=$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --format '{{.Manifest.Digest}}')
-          
-          # Create manifest for version tag
-          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.build-strategy.outputs.VERSION }} \
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH@$IMAGE_DIGEST
-          
-          # Create manifest for latest tag if on main branch
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest \
-              ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH@$IMAGE_DIGEST
+          # Only create manifest if we have multiple platforms
+          PLATFORMS=$(echo '${{ needs.build-strategy.outputs.platforms }}' | jq -r 'join(",")')
+          if [[ "$PLATFORMS" == *"linux/arm64"* ]]; then
+            # Get the digests of the built images for both platforms
+            AMD64_DIGEST=$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --format '{{.Manifest.Digest}}')
+            ARM64_DIGEST=$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --format '{{.Manifest.Digest}}')
+            
+            # Create manifest for version tag with platform info
+            docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.build-strategy.outputs.VERSION }} \
+              ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH@$AMD64_DIGEST \
+              ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH@$ARM64_DIGEST
+            
+            # Create manifest for latest tag if on main branch
+            if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+              docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest \
+                ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH@$AMD64_DIGEST \
+                ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH@$ARM64_DIGEST
+            fi
+          else
+            echo "Single platform build, skipping manifest creation"
           fi
 
   tag:
