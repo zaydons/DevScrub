@@ -267,24 +267,20 @@ jobs:
           BRANCH=${GITHUB_REF##*/}
           VERSION=${{ needs.build-strategy.outputs.VERSION }}
           
-          # Create tags only if they don't exist or are different
-          if ! git tag -l | grep -q "^$BRANCH$"; then
-            git tag "$BRANCH"
-            echo "Created tag: $BRANCH"
+          # Force create/update tags (this will overwrite existing tags)
+          git tag -f "$BRANCH"
+          echo "Created/updated tag: $BRANCH"
+          
+          git tag -f "v$VERSION"
+          echo "Created/updated tag: v$VERSION"
+          
+          if [ "$BRANCH" = "main" ]; then
+            git tag -f latest
+            echo "Created/updated tag: latest"
           fi
           
-          if ! git tag -l | grep -q "^v$VERSION$"; then
-            git tag "v$VERSION"
-            echo "Created tag: v$VERSION"
-          fi
-          
-          if [ "$BRANCH" = "main" ] && ! git tag -l | grep -q "^latest$"; then
-            git tag latest
-            echo "Created tag: latest"
-          fi
-          
-          # Push tags
-          git push origin --tags
+          # Force push tags
+          git push origin --tags --force
 
   notify:
     needs: [build-strategy, build, verify, tag]
