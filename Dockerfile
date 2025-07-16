@@ -1,14 +1,14 @@
-# DevScrub Security Scanner - Optimized Multi-stage Build
+# DevScrub Security Scanner - Optimized Ubuntu Build
 # BuildKit: 1.0
 # Syntax: docker/dockerfile:1.4
 
 # Version extraction
-FROM alpine:3.22.0 AS version
+FROM ubuntu:22.04 AS version
 COPY VERSION /VERSION
 RUN VERSION=$(cat /VERSION | tr -d ' \n') && echo "VERSION=$VERSION" > /version.env
 
 # Base stage
-FROM alpine:3.22.0 AS base
+FROM ubuntu:22.04 AS base
 
 # Define build arguments
 ARG VERSION
@@ -28,106 +28,58 @@ LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.revision="${GIT_SHA}"
 LABEL org.opencontainers.image.version="${VERSION}"
 
+# Set non-interactive frontend
+ENV DEBIAN_FRONTEND=noninteractive
+
 # Security: Set shell for better error handling
-SHELL ["/bin/ash", "-o", "pipefail", "-c"]
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Security: Create non-root user
-RUN addgroup -g 1000 scanner && \
-    adduser -D -s /bin/bash -u 1000 -G scanner scanner
+RUN groupadd -g 1000 scanner && \
+    useradd -m -s /bin/bash -u 1000 -g scanner scanner
 
-# Install essential packages
-RUN apk update && \
-    apk upgrade --no-cache && \
-    apk add --no-cache \
+# Install Python 3.12.11 from deadsnakes PPA
+RUN apt-get update && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
+    python3.12-pip \
     curl \
     git \
-    bash \
-    docker-cli \
-    libffi \
-    openssl \
-    zlib \
-    bzip2 \
-    readline \
-    sqlite \
-    ncurses \
-    xz \
-    libxml2 \
+    docker.io \
     ca-certificates && \
-    rm -rf /var/cache/apk/* && \
+    # Create symlinks
+    ln -sf /usr/bin/python3.12 /usr/local/bin/python && \
+    ln -sf /usr/bin/python3.12 /usr/local/bin/python3 && \
+    ln -sf /usr/bin/pip3.12 /usr/local/bin/pip && \
+    # Clean up
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
     chown -R scanner:scanner /home/scanner
 
-# Python build stage
-FROM base AS python-build
-WORKDIR /tmp/python-build
-
-# Install build dependencies for Python compilation
-RUN apk add --no-cache --virtual .build-deps \
-    gcc \
-    g++ \
-    make \
-    musl-dev \
-    libffi-dev \
-    openssl-dev \
-    zlib-dev \
-    bzip2-dev \
-    readline-dev \
-    sqlite-dev \
-    ncurses-dev \
-    xz-dev \
-    libxml2-dev \
-    python3-dev
-
-# Download and build Python with optimizations
-RUN curl -fsSL https://www.python.org/ftp/python/3.12.11/Python-3.12.11.tgz | tar -xz && \
-    cd Python-3.12.11 && \
-    ./configure \
-        --prefix=/usr/local \
-        --enable-optimizations \
-        --with-ensurepip=install \
-        --with-system-ffi \
-        --enable-loadable-sqlite-extensions \
-        --with-lto && \
-    # Use profile-opt only on x86_64, regular make on ARM64
-    if [ "$(uname -m)" = "x86_64" ]; then \
-        make -j$(nproc) profile-opt LDFLAGS="-Wl,--strip-all"; \
-    else \
-        make -j$(nproc) LDFLAGS="-Wl,--strip-all"; \
-    fi && \
-    make install && \
-    ln -sf /usr/local/bin/python3 /usr/local/bin/python && \
-    ln -sf /usr/local/bin/pip3 /usr/local/bin/pip && \
-    pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    cd / && rm -rf /tmp/python-build && \
-    apk del .build-deps && \
-    rm -rf /var/cache/apk/*
-
 # Node.js tools stage
-FROM node:24-alpine AS node-tools
+FROM node:24 AS node-tools
 
 # Install Node.js tools
 RUN npm config set audit false && \
     npm config set fund false && \
     npm cache clean --force && \
-    apk add --no-cache libstdc++ gcc && \
     npm install -g eslint@8.57.0 && \
-    npm cache clean --force && \
-    apk del gcc && \
-    rm -rf /var/cache/apk/*
+    npm cache clean --force
 
 # Final production stage
 FROM base AS final
 
-# Copy Python and Node.js from build stages
-COPY --from=python-build /usr/local /usr/local
+# Copy Node.js from build stage
 COPY --from=node-tools /usr/local/bin/node /usr/local/bin/
 COPY --from=node-tools /usr/local/bin/npm /usr/local/bin/
 COPY --from=node-tools /usr/local/bin/yarn /usr/local/bin/
 COPY --from=node-tools /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=node-tools /usr/local/bin/eslint /usr/local/bin/
-
-# Install required libraries for Node.js
-RUN apk add --no-cache libstdc++ && \
-    rm -rf /var/cache/apk/*
 
 # Set working directory
 WORKDIR /scan
