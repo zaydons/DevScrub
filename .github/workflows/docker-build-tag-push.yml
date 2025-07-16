@@ -53,9 +53,9 @@ jobs:
         id: strategy
         run: |
           if [[ "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "release" ]]; then
-            echo "platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
+            echo 'platforms=["linux/amd64","linux/arm64"]' >> $GITHUB_OUTPUT
           else
-            echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
+            echo 'platforms=["linux/amd64"]' >> $GITHUB_OUTPUT
           fi
       - name: Extract version
         id: version
@@ -81,7 +81,7 @@ jobs:
     runs-on: ubuntu-latest-4-cores
     strategy:
       matrix:
-        platform: ${{ fromJson(format('[{0}]', needs.build-strategy.outputs.platforms)) }}
+        platform: ${{ fromJson(needs.build-strategy.outputs.platforms) }}
     permissions:
       contents: write
       packages: write
@@ -125,7 +125,7 @@ jobs:
     needs: [build-strategy, build]
     if: |
       (github.ref == 'refs/heads/main' || github.event_name == 'release') &&
-      (needs.build-strategy.outputs.platforms == 'linux/amd64,linux/arm64')
+      (contains(needs.build-strategy.outputs.platforms, 'linux/arm64'))
     runs-on: ubuntu-latest
     permissions:
       packages: write
