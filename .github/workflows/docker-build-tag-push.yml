@@ -108,9 +108,8 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: |
-            type=image,name=ghcr.io/${{ github.repository_owner }}/devscrub,push-by-digest=true,name-canonical=true,push=true
-            type=image,name=ghcr.io/${{ github.repository_owner }}/devscrub:${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }},push=true
+          push: true
+          tags: ${{ needs.build-strategy.outputs.tags }}
           cache-from: |
             type=gha,scope=build-${{ matrix.platform }}
             type=registry,ref=ghcr.io/${{ github.repository_owner }}/devscrub:buildcache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
