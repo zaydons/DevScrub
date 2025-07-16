@@ -47,18 +47,17 @@ RUN apt-get update && \
     python3.12 \
     python3.12-venv \
     python3.12-dev \
-    python3.12-distutils \
     curl \
     git \
     docker.io \
     ca-certificates \
     libstdc++6 && \
-    # Install pip for Python 3.12
-    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 && \
+    # Install pip for Python 3.12 using ensurepip
+    python3.12 -m ensurepip --upgrade && \
     # Create symlinks
     ln -sf /usr/bin/python3.12 /usr/local/bin/python && \
     ln -sf /usr/bin/python3.12 /usr/local/bin/python3 && \
-    ln -sf /usr/local/bin/pip /usr/local/bin/pip && \
+    ln -sf /usr/bin/pip3.12 /usr/local/bin/pip && \
     # Clean up
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
