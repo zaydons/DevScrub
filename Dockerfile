@@ -87,7 +87,12 @@ RUN curl -fsSL https://www.python.org/ftp/python/3.12.11/Python-3.12.11.tgz | ta
         --with-system-ffi \
         --enable-loadable-sqlite-extensions \
         --with-lto && \
-    make -j$(nproc) LDFLAGS="-Wl,--strip-all" && \
+    # Use profile-opt only on x86_64, regular make on ARM64
+    if [ "$(uname -m)" = "x86_64" ]; then \
+        make -j$(nproc) profile-opt LDFLAGS="-Wl,--strip-all"; \
+    else \
+        make -j$(nproc) LDFLAGS="-Wl,--strip-all"; \
+    fi && \
     make install && \
     ln -sf /usr/local/bin/python3 /usr/local/bin/python && \
     ln -sf /usr/local/bin/pip3 /usr/local/bin/pip && \
