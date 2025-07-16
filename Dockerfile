@@ -120,6 +120,10 @@ COPY --from=node-tools /usr/local/bin/yarn /usr/local/bin/
 COPY --from=node-tools /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=node-tools /usr/local/bin/eslint /usr/local/bin/
 
+# Install required libraries for Node.js
+RUN apk add --no-cache libstdc++ && \
+    rm -rf /var/cache/apk/*
+
 # Set working directory
 WORKDIR /scan
 
