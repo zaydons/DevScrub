@@ -4,41 +4,66 @@ on:
   push:
     branches:
       - '**'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
   release:
     types: [published]
 
 jobs:
-  build-tag-push:
+  changes:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-
+    outputs:
+      docker: ${{ steps.filter.outputs.docker }}
+      python: ${{ steps.filter.outputs.python }}
+      node: ${{ steps.filter.outputs.node }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v2
+        id: filter
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          filters: |
+            docker:
+              - 'Dockerfile'
+              - 'docker-compose.yml'
+              - '.dockerignore'
+            python:
+              - 'requirements.txt'
+              - 'src/**/*.py'
+              - 'scripts/**/*.py'
+            node:
+              - 'package.json'
+              - 'package-lock.json'
+              - 'yarn.lock'
+              - 'src/**/*.js'
+              - 'src/**/*.ts'
 
+  build-strategy:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true'
+    outputs:
+      platforms: ${{ steps.strategy.outputs.platforms }}
+      tags: ${{ steps.tags.outputs.tags }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Determine build platforms
+        id: strategy
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
+          else
+            echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
+          fi
       - name: Extract version
-        id: get_version
+        id: version
         run: |
           VERSION=$(cat VERSION | tr -d ' \n')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-
       - name: Set Docker tags
-        id: set_tags
+        id: tags
         run: |
           BRANCH=${GITHUB_REF##*/}
           TAGS="ghcr.io/${{ github.repository_owner }}/devscrub:$BRANCH"
@@ -46,31 +71,102 @@ jobs:
             TAGS="$TAGS,ghcr.io/${{ github.repository_owner }}/devscrub:latest"
           fi
           if [ "${{ github.event_name }}" = "release" ]; then
-            TAGS="$TAGS,ghcr.io/${{ github.repository_owner }}/devscrub:${{ steps.get_version.outputs.version }}"
+            TAGS="$TAGS,ghcr.io/${{ github.repository_owner }}/devscrub:${{ steps.version.outputs.version }}"
           fi
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
 
-      - name: Build and push Docker image
+  build:
+    needs: [changes, build-strategy]
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true'
+    runs-on: ubuntu-latest-4-cores
+    strategy:
+      matrix:
+        platform: ${{ fromJson(format('[{0}]', needs.build-strategy.outputs.platforms)) }}
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:v0.12.0
+            network=host
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.set_tags.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          outputs: |
+            type=image,name=ghcr.io/${{ github.repository_owner }}/devscrub,push-by-digest=true,name-canonical=true,push=true
+            type=image,name=ghcr.io/${{ github.repository_owner }}/devscrub:${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }},push=true
+          cache-from: |
+            type=gha,scope=build-${{ matrix.platform }}
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/devscrub:buildcache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          cache-to: |
+            type=gha,mode=max,scope=build-${{ matrix.platform }}
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/devscrub:buildcache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }},mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            TARGETPLATFORM=${{ matrix.platform }}
 
+  manifest:
+    needs: [build-strategy, build]
+    if: |
+      (github.ref == 'refs/heads/main' || github.event_name == 'release') &&
+      (needs.build-strategy.outputs.platforms == 'linux/amd64,linux/arm64')
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create and push manifest
+        run: |
+          docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/devscrub:${{ needs.build-strategy.outputs.version }} \
+            ghcr.io/${{ github.repository_owner }}/devscrub:amd64@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/devscrub:amd64 --format '{{.Manifest.Digest}}') \
+            ghcr.io/${{ github.repository_owner }}/devscrub:arm64@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/devscrub:arm64 --format '{{.Manifest.Digest}}')
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/devscrub:latest \
+              ghcr.io/${{ github.repository_owner }}/devscrub:amd64@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/devscrub:amd64 --format '{{.Manifest.Digest}}') \
+              ghcr.io/${{ github.repository_owner }}/devscrub:arm64@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/devscrub:arm64 --format '{{.Manifest.Digest}}')
+          fi
+
+  tag:
+    needs: [build-strategy, build, manifest]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
       - name: Set up git for tag push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-
       - name: Force-update branch tag
         run: |
           BRANCH=${GITHUB_REF##*/}
           git tag -f "$BRANCH"
           git push origin "refs/tags/$BRANCH" --force
-
       - name: Force-update latest tag (main only)
         if: github.ref == 'refs/heads/main'
         run: |
