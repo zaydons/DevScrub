@@ -23,6 +23,11 @@ env:
   IMAGE_NAME: devscrub
   DOCKER_BUILDKIT: 1
 
+# Define workflow permissions
+permissions:
+  contents: read
+  packages: write
+
 # Prevent multiple builds from running simultaneously
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
