@@ -23,6 +23,11 @@ env:
   IMAGE_NAME: devscrub
   DOCKER_BUILDKIT: 1
 
+# Prevent multiple builds from running simultaneously
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -70,6 +75,7 @@ jobs:
           echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
           echo "git_sha=${{ github.sha }}" >> $GITHUB_OUTPUT
           echo "git_ref=${{ github.ref }}" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
       - name: Determine build strategy
         id: strategy
         run: |
@@ -95,10 +101,10 @@ jobs:
       - name: Prepare build arguments
         id: build_args
         run: |
-          BUILD_ARGS="VERSION=${{ steps.version.outputs.version }}"
-          BUILD_ARGS="$BUILD_ARGS,BUILD_DATE=${{ steps.build_date }}"
-          BUILD_ARGS="$BUILD_ARGS,GIT_SHA=${{ steps.git_sha }}"
-          BUILD_ARGS="$BUILD_ARGS,GIT_REF=${{ steps.git_ref }}"
+          BUILD_ARGS="VERSION=${{ env.VERSION }}"
+          BUILD_ARGS="$BUILD_ARGS,BUILD_DATE=${{ steps.version.outputs.build_date }}"
+          BUILD_ARGS="$BUILD_ARGS,GIT_SHA=${{ steps.version.outputs.git_sha }}"
+          BUILD_ARGS="$BUILD_ARGS,GIT_REF=${{ steps.version.outputs.git_ref }}"
           BUILD_ARGS="$BUILD_ARGS,TARGETPLATFORM=\$TARGETPLATFORM"
           echo "build_args=$BUILD_ARGS" >> $GITHUB_OUTPUT
 
@@ -168,6 +174,43 @@ jobs:
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
         continue-on-error: true
+      - name: Verify build success
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "❌ Build failed for platform: ${{ matrix.platform }}"
+          echo "Check the build logs above for details"
+          exit 1
+
+  verify:
+    needs: [build-strategy, build]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: ${{ fromJson(needs.build-strategy.outputs.platforms) }}
+    permissions:
+      packages: read
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify image functionality
+        run: |
+          echo "Verifying image for platform: ${{ matrix.platform }}"
+          
+          # Pull the built image
+          docker pull ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ matrix.platform }}
+          
+          # Test basic functionality
+          docker run --rm ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ matrix.platform }} python --version
+          docker run --rm ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ matrix.platform }} node --version
+          
+          echo "✅ Image verification successful for ${{ matrix.platform }}"
 
   manifest:
     needs: [build-strategy, build]
@@ -219,4 +262,22 @@ jobs:
           if [ "$BRANCH" = "main" ]; then
             git tag -f latest
           fi
-          git push origin --tags --force 
+          git push origin --tags --force
+
+  notify:
+    needs: [build-strategy, build, verify, tag]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build status
+        run: |
+          if [ "${{ needs.build.result }}" = "success" ] && [ "${{ needs.verify.result }}" = "success" ]; then
+            echo "✅ Build completed successfully!"
+            echo "📦 Images pushed to: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}"
+            echo "🏷️  Tags created for version: ${{ needs.build-strategy.outputs.version }}"
+          else
+            echo "❌ Build failed!"
+            echo "Build result: ${{ needs.build.result }}"
+            echo "Verify result: ${{ needs.verify.result }}"
+            exit 1
+          fi 
