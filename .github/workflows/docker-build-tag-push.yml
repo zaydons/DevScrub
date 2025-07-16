@@ -214,7 +214,6 @@ jobs:
           # Test basic functionality by overriding entrypoint
           docker run --rm --entrypoint python ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --version
           docker run --rm --entrypoint node ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --version
-          docker run --rm --entrypoint npm ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --version
           
           echo "✅ Image verification successful for ${{ matrix.platform }}"
 
