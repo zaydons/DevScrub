@@ -1,4 +1,4 @@
-name: Secure Build, Tag, and Push Docker Image
+name: Build, Tag, and Push Docker Image
 
 on:
   push:
@@ -8,7 +8,6 @@ on:
       - '**.md'
       - 'docs/**'
       - '.gitignore'
-      - 'security-reports/**'
   release:
     types: [published]
   workflow_dispatch:
@@ -25,245 +24,6 @@ env:
   DOCKER_BUILDKIT: 1
 
 jobs:
-  security-scan:
-    name: Security Analysis
-    runs-on: ubuntu-latest
-    outputs:
-      vulnerabilities: ${{ steps.scan.outputs.vulnerabilities }}
-      sbom: ${{ steps.sbom.outputs.sbom }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH'
-      - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: 'trivy-results.sarif'
-      - name: Upload Trivy results for issue creation
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: trivy-results
-          path: trivy-results.sarif
-          retention-days: 1
-      - name: Install Syft
-        run: |
-          echo "Installing Syft for SBOM generation..."
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-          syft --version
-      - name: Generate SBOM
-        id: sbom
-        run: |
-          echo "Generating Software Bill of Materials..."
-          syft packages . -o cyclonedx-json > sbom.json
-          echo "sbom=sbom.json" >> $GITHUB_OUTPUT
-      - name: Check for critical vulnerabilities
-        id: scan
-        run: |
-          if [ -f trivy-results.sarif ]; then
-            VULN_COUNT=$(jq '.runs[0].results | length' trivy-results.sarif 2>/dev/null || echo "0")
-            echo "vulnerabilities=$VULN_COUNT" >> $GITHUB_OUTPUT
-            if [ "$VULN_COUNT" -gt 0 ]; then
-              echo "⚠️ Found $VULN_COUNT vulnerabilities"
-              # Save vulnerability details for issue creation
-              jq '.runs[0].results' trivy-results.sarif > vuln-details.json
-              echo "Vulnerability details saved to vuln-details.json"
-            else
-              echo "✅ No vulnerabilities found"
-            fi
-          else
-            echo "vulnerabilities=0" >> $GITHUB_OUTPUT
-          fi
-
-  create-vulnerability-issue:
-    name: Create Vulnerability Issue
-    needs: security-scan
-    if: |
-      always() && 
-      needs.security-scan.result == 'success' && 
-      needs.security-scan.outputs.vulnerabilities != '0'
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download Trivy results
-        uses: actions/download-artifact@v4
-        with:
-          name: trivy-results
-          path: ./
-      - name: Create vulnerability issue
-        id: create-issue
-        run: |
-          echo "Creating vulnerability issue..."
-          
-          # Get vulnerability details from the security scan job
-          VULN_COUNT=${{ needs.security-scan.outputs.vulnerabilities }}
-          
-          # Parse vulnerability details from SARIF file
-          if [ -f trivy-results.sarif ]; then
-            VULN_DATA=$(jq '.runs[0].results' trivy-results.sarif)
-          else
-            echo "Warning: trivy-results.sarif not found, using empty vulnerability data"
-            VULN_DATA="[]"
-          fi
-          
-          # Create issue title
-          ISSUE_TITLE="🚨 Security Vulnerabilities Detected: $VULN_COUNT Critical/High Issues Found"
-          
-          # Create issue body with detailed information
-          ISSUE_BODY="# Security Vulnerability Alert
-          
-          ## Summary
-          **$VULN_COUNT critical/high vulnerabilities** were detected in the latest security scan.
-          
-          **Build Information:**
-          - **Repository:** ${{ github.repository }}
-          - **Branch:** ${{ github.ref_name }}
-          - **Commit:** ${{ github.sha }}
-          - **Scan Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
-          - **Workflow:** ${{ github.workflow }}
-          - **Run ID:** ${{ github.run_id }}
-          
-          ## Vulnerability Details
-          
-          $(echo "$VULN_DATA" | jq -r '.[] | "### \(.rule.id)\n- **Severity:** \(.level)\n- **Component:** \(.locations[0].physicalLocation.artifactLocation.uri // "Unknown")\n- **Line:** \(.locations[0].physicalLocation.region.startLine // "N/A")\n- **Description:** \(.message.text)\n- **Rule:** \(.rule.id)\n\n---\n"')
-          
-          ## Recommended Actions
-          
-          1. **Immediate Actions:**
-             - [ ] Review all critical vulnerabilities first
-             - [ ] Update vulnerable dependencies
-             - [ ] Apply security patches
-             - [ ] Test fixes in development environment
-          
-          2. **Investigation:**
-             - [ ] Analyze root cause of vulnerabilities
-             - [ ] Check if vulnerabilities are exploitable in production
-             - [ ] Review dependency update impact
-          
-          3. **Remediation:**
-             - [ ] Update package versions
-             - [ ] Apply security patches
-             - [ ] Run security scan after fixes
-             - [ ] Verify fixes resolve vulnerabilities
-          
-          ## Additional Resources
-          
-          - [Full Scan Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          - [Security Tab](https://github.com/${{ github.repository }}/security)
-          - [Dependabot Alerts](https://github.com/${{ github.repository }}/security/dependabot)
-          
-          ---
-          
-          *This issue was automatically created by the security scanning workflow. Please address these vulnerabilities promptly to maintain security compliance.*"
-          
-          # Create the issue using GitHub CLI
-          ISSUE_URL=$(gh issue create \
-            --title "$ISSUE_TITLE" \
-            --body "$ISSUE_BODY" \
-            --label "security" \
-            --label "vulnerability" \
-            --label "high-priority" \
-            --assignee "${{ github.actor }}" \
-            --json url \
-            --jq '.url')
-          
-          echo "issue_url=$ISSUE_URL" >> $GITHUB_OUTPUT
-          echo "✅ Vulnerability issue created: $ISSUE_URL"
-          
-          # Add comment to the issue with additional context
-          gh issue comment "$(echo "$ISSUE_URL" | sed 's/.*\///')" \
-            --body "## Additional Context
-            
-            **Workflow Details:**
-            - **Trigger:** ${{ github.event_name }}
-            - **Actor:** ${{ github.actor }}
-            - **Event:** ${{ github.event_name }}
-            
-            **Next Steps:**
-            1. Review the vulnerability details above
-            2. Prioritize critical vulnerabilities
-            3. Create a remediation plan
-            4. Update this issue with progress
-            
-            **Security Best Practices:**
-            - Address critical vulnerabilities within 24 hours
-            - Address high vulnerabilities within 72 hours
-            - Test all fixes before deploying to production
-            - Document remediation steps for future reference"
-
-  close-vulnerability-issues:
-    name: Close Resolved Vulnerability Issues
-    needs: security-scan
-    if: |
-      always() && 
-      needs.security-scan.result == 'success' && 
-      needs.security-scan.outputs.vulnerabilities == '0'
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-      contents: read
-    steps:
-      - name: Close resolved vulnerability issues
-        run: |
-          echo "Checking for open vulnerability issues to close..."
-          
-          # Find open issues with vulnerability labels
-          OPEN_ISSUES=$(gh issue list \
-            --label "vulnerability" \
-            --state "open" \
-            --json number,title,url \
-            --jq '.[] | select(.title | contains("Security Vulnerabilities Detected")) | .number')
-          
-          if [ -n "$OPEN_ISSUES" ]; then
-            echo "Found open vulnerability issues: $OPEN_ISSUES"
-            
-            for ISSUE_NUMBER in $OPEN_ISSUES; do
-              echo "Closing issue #$ISSUE_NUMBER"
-              
-              # Add resolution comment
-              gh issue comment "$ISSUE_NUMBER" \
-                --body "## ✅ Vulnerabilities Resolved
-                
-                **Resolution Details:**
-                - **Scan Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
-                - **Commit:** ${{ github.sha }}
-                - **Branch:** ${{ github.ref_name }}
-                - **Actor:** ${{ github.actor }}
-                
-                **Status:** All critical and high vulnerabilities have been resolved.
-                
-                **Next Steps:**
-                - [ ] Verify the fix in production
-                - [ ] Monitor for new vulnerabilities
-                - [ ] Update security documentation if needed
-                
-                ---
-                
-                *This issue is being automatically closed as vulnerabilities have been resolved.*"
-              
-              # Close the issue
-              gh issue close "$ISSUE_NUMBER" \
-                --reason "completed" \
-                --delete-branch
-              
-              echo "✅ Issue #$ISSUE_NUMBER closed successfully"
-            done
-          else
-            echo "No open vulnerability issues found to close"
-          fi
-
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -293,7 +53,7 @@ jobs:
 
   build-strategy:
     runs-on: ubuntu-latest
-    needs: [changes, security-scan]
+    needs: changes
     if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || github.event.inputs.force_rebuild == 'true'
     outputs:
       platforms: ${{ steps.strategy.outputs.platforms }}
@@ -343,7 +103,7 @@ jobs:
           echo "build_args=$BUILD_ARGS" >> $GITHUB_OUTPUT
 
   build:
-    needs: [changes, build-strategy, security-scan]
+    needs: [changes, build-strategy]
     if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || github.event.inputs.force_rebuild == 'true'
     runs-on: ubuntu-latest
     strategy:
@@ -352,7 +112,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      security-events: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -409,16 +168,6 @@ jobs:
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
         continue-on-error: true
-      - name: Scan built image
-        if: steps.build.outcome == 'success'
-        run: |
-          echo "Scanning built image for vulnerabilities..."
-          trivy image --format sarif --output trivy-image-results.sarif ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ matrix.platform }}
-      - name: Upload image scan results
-        if: always() && steps.build.outcome == 'success'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: 'trivy-image-results.sarif'
 
   manifest:
     needs: [build-strategy, build]
@@ -448,33 +197,6 @@ jobs:
               ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:amd64@$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:amd64 --format '{{.Manifest.Digest}}') \
               ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:arm64@$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:arm64 --format '{{.Manifest.Digest}}')
           fi
-
-  security-report:
-    needs: [security-scan, build]
-    if: always()
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - name: Generate security report
-        run: |
-          echo "# Security Scan Report" > security-reports/scan-report.md
-          echo "Generated: $(date -u)" >> security-reports/scan-report.md
-          echo "" >> security-reports/scan-report.md
-          echo "## Vulnerability Summary" >> security-reports/scan-report.md
-          echo "- Total vulnerabilities: ${{ needs.security-scan.outputs.vulnerabilities }}" >> security-reports/scan-report.md
-          echo "- Build status: ${{ needs.build.result }}" >> security-reports/scan-report.md
-          echo "" >> security-reports/scan-report.md
-          echo "## SBOM Information" >> security-reports/scan-report.md
-          echo "- SBOM generated: ${{ needs.security-scan.outputs.sbom }}" >> security-reports/scan-report.md
-      - name: Commit security report
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add security-reports/
-          git commit -m "Update security scan report" || exit 0
-          git push origin ${{ github.ref }}
 
   tag:
     needs: [build-strategy, build, manifest]
