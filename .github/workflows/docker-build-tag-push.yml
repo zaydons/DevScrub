@@ -166,6 +166,7 @@ jobs:
           echo "  GIT_SHA: ${{ needs.build-strategy.outputs.GIT_SHA }}"
           echo "  GIT_REF: ${{ needs.build-strategy.outputs.GIT_REF }}"
           echo "Tags: ${{ needs.build-strategy.outputs.tags }}"
+          echo "Labels: ${{ steps.meta.outputs.labels }}"
           echo "Platform: ${{ matrix.platform }}"
           docker version
           docker buildx version
@@ -185,12 +186,18 @@ jobs:
         id: build
         run: |
           echo "🔨 Building for platform: ${{ matrix.platform }}"
+          echo "📋 Build args:"
+          echo "  VERSION: ${{ needs.build-strategy.outputs.VERSION }}"
+          echo "  BUILD_DATE: ${{ needs.build-strategy.outputs.BUILD_DATE }}"
+          echo "  GIT_SHA: ${{ needs.build-strategy.outputs.GIT_SHA }}"
+          echo "  GIT_REF: ${{ needs.build-strategy.outputs.GIT_REF }}"
+          echo "  TAGS: ${{ needs.build-strategy.outputs.tags }}"
           
-          # Build with detailed output
+          # Build with detailed output and error capture
+          set -o pipefail
           docker buildx build \
             --platform ${{ matrix.platform }} \
             --tag ${{ needs.build-strategy.outputs.tags }} \
-            --label "${{ steps.meta.outputs.labels }}" \
             --cache-from type=local,src=/tmp/.buildx-cache \
             --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
             --build-arg VERSION=${{ needs.build-strategy.outputs.VERSION }} \
@@ -200,22 +207,24 @@ jobs:
             --provenance=true \
             --sbom=true \
             --push \
-            .
+            . 2>&1 | tee build.log
+          
+          BUILD_EXIT_CODE=${PIPESTATUS[0]}
+          echo "🔍 Build completed with exit code: $BUILD_EXIT_CODE"
+          
+          if [ $BUILD_EXIT_CODE -ne 0 ]; then
+            echo "❌ Build failed! Full build log:"
+            cat build.log
+            exit $BUILD_EXIT_CODE
+          else
+            echo "✅ Build completed successfully!"
+          fi
       - name: Move cache
         run: |
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
         continue-on-error: true
-      - name: Check build status
-        if: always()
-        run: |
-          if [ "${{ steps.build.outcome }}" = "failure" ]; then
-            echo "❌ Build failed for platform: ${{ matrix.platform }}"
-            echo "Check the build logs above for details"
-            exit 1
-          else
-            echo "✅ Build completed successfully for platform: ${{ matrix.platform }}"
-          fi
+
 
   verify:
     needs: [build-strategy, build]
