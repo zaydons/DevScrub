@@ -203,12 +203,15 @@ jobs:
         run: |
           echo "Verifying image for platform: ${{ matrix.platform }}"
           
-          # Pull the built image
-          docker pull ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ matrix.platform }}
+          # Get the branch name for the tag
+          BRANCH=${GITHUB_REF##*/}
+          
+          # Pull the built image using the branch tag
+          docker pull ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH
           
           # Test basic functionality
-          docker run --rm ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ matrix.platform }} python --version
-          docker run --rm ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ matrix.platform }} node --version
+          docker run --rm ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH python --version
+          docker run --rm ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH node --version
           
           echo "✅ Image verification successful for ${{ matrix.platform }}"
 
