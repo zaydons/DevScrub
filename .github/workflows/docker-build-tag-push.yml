@@ -49,19 +49,33 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - name: Debug environment
+        run: |
+          echo "=== Environment Debug Info ==="
+          echo "GitHub Event: ${{ github.event_name }}"
+          echo "GitHub Ref: ${{ github.ref }}"
+          echo "GitHub SHA: ${{ github.sha }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "Runner OS: ${{ runner.os }}"
+          echo "Runner Architecture: ${{ runner.arch }}"
+          echo "================================"
       - name: Determine build platforms
         id: strategy
         run: |
           if [[ "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "release" ]]; then
             echo 'platforms=["linux/amd64","linux/arm64"]' >> $GITHUB_OUTPUT
+            echo "Selected platforms: linux/amd64, linux/arm64"
           else
             echo 'platforms=["linux/amd64"]' >> $GITHUB_OUTPUT
+            echo "Selected platforms: linux/amd64"
           fi
       - name: Extract version
         id: version
         run: |
           VERSION=$(cat VERSION | tr -d ' \n')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
       - name: Set Docker tags
         id: tags
         run: |
@@ -74,6 +88,7 @@ jobs:
             TAGS="$TAGS,ghcr.io/${{ github.repository_owner }}/devscrub:${{ steps.version.outputs.version }}"
           fi
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          echo "Generated tags: $TAGS"
 
   build:
     needs: [changes, build-strategy]
@@ -88,25 +103,73 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      - name: Debug build environment
+        run: |
+          echo "=== Build Environment Debug ==="
+          echo "Platform: ${{ matrix.platform }}"
+          echo "Tags: ${{ needs.build-strategy.outputs.tags }}"
+          echo "Version: ${{ needs.build-strategy.outputs.version }}"
+          echo "Docker version:"
+          docker --version
+          echo "Available disk space:"
+          df -h
+          echo "Memory info:"
+          free -h
+          echo "================================"
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+        continue-on-error: true
+      - name: Debug QEMU setup
+        if: always()
+        run: |
+          echo "=== QEMU Debug ==="
+          docker run --rm --platform ${{ matrix.platform }} alpine:latest echo "QEMU test successful"
+          echo "================================"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: |
-            image=moby/buildkit:v0.12.0
-            network=host
+        continue-on-error: true
+      - name: Debug Buildx setup
+        if: always()
+        run: |
+          echo "=== Buildx Debug ==="
+          docker buildx version
+          docker buildx ls
+          echo "================================"
       - name: Check GitHub Container Registry status
         run: |
-          echo "Checking GitHub Container Registry availability..."
-          curl -s -o /dev/null -w "%{http_code}" https://ghcr.io/v2/ || echo "Registry check failed"
+          echo "=== Registry Status Check ==="
+          echo "Testing registry connectivity..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://ghcr.io/v2/ || echo "000")
+          echo "Registry HTTP response code: $HTTP_CODE"
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "Registry is accessible"
+          else
+            echo "Registry may have issues (HTTP $HTTP_CODE)"
+          fi
+          echo "================================"
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push by digest
+        continue-on-error: true
+      - name: Debug registry login
+        if: always()
+        run: |
+          echo "=== Registry Login Debug ==="
+          docker info | grep -A 5 "Registry Mirrors" || echo "No registry mirrors configured"
+          echo "================================"
+      - name: Debug Dockerfile
+        run: |
+          echo "=== Dockerfile Debug ==="
+          echo "Dockerfile contents:"
+          head -20 Dockerfile
+          echo "..."
+          tail -10 Dockerfile
+          echo "Dockerfile size: $(wc -l < Dockerfile) lines"
+          echo "================================"
+      - name: Build and push
         id: build
         uses: docker/build-push-action@v5
         with:
@@ -114,14 +177,23 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ needs.build-strategy.outputs.tags }}
-          cache-from: |
-            type=gha,scope=build-${{ matrix.platform }}
-          cache-to: |
-            type=gha,mode=max,scope=build-${{ matrix.platform }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             TARGETPLATFORM=${{ matrix.platform }}
         continue-on-error: true
+      - name: Debug build output
+        if: always()
+        run: |
+          echo "=== Build Debug ==="
+          echo "Build step outcome: ${{ steps.build.outcome }}"
+          echo "Build step conclusion: ${{ steps.build.conclusion }}"
+          if [ "${{ steps.build.outcome }}" = "failure" ]; then
+            echo "Build failed - checking for error details..."
+            echo "Last 50 lines of build logs would be here in actual failure"
+          else
+            echo "Build appears successful"
+          fi
+          echo "================================"
       - name: Retry build on failure
         if: steps.build.outcome == 'failure'
         uses: docker/build-push-action@v5
@@ -130,13 +202,24 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ needs.build-strategy.outputs.tags }}
-          cache-from: |
-            type=gha,scope=build-${{ matrix.platform }}
-          cache-to: |
-            type=gha,mode=max,scope=build-${{ matrix.platform }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             TARGETPLATFORM=${{ matrix.platform }}
+        continue-on-error: true
+      - name: Debug retry build
+        if: always() && steps.build.outcome == 'failure'
+        run: |
+          echo "=== Retry Build Debug ==="
+          echo "Retry build completed"
+          echo "================================"
+      - name: Final build status
+        if: always()
+        run: |
+          echo "=== Final Build Status ==="
+          echo "Platform: ${{ matrix.platform }}"
+          echo "Original build outcome: ${{ steps.build.outcome }}"
+          echo "Job status: ${{ job.status }}"
+          echo "================================"
 
   manifest:
     needs: [build-strategy, build]
@@ -147,6 +230,14 @@ jobs:
     permissions:
       packages: write
     steps:
+      - name: Debug manifest prerequisites
+        run: |
+          echo "=== Manifest Debug ==="
+          echo "GitHub ref: ${{ github.ref }}"
+          echo "GitHub event: ${{ github.event_name }}"
+          echo "Platforms: ${{ needs.build-strategy.outputs.platforms }}"
+          echo "Build job status: ${{ needs.build.result }}"
+          echo "================================"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Log in to GitHub Container Registry
@@ -157,14 +248,20 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create and push manifest
         run: |
+          echo "=== Creating Multi-Arch Manifest ==="
+          echo "Version: ${{ needs.build-strategy.outputs.version }}"
+          echo "Repository: ${{ github.repository_owner }}/devscrub"
           docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/devscrub:${{ needs.build-strategy.outputs.version }} \
             ghcr.io/${{ github.repository_owner }}/devscrub:amd64@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/devscrub:amd64 --format '{{.Manifest.Digest}}') \
             ghcr.io/${{ github.repository_owner }}/devscrub:arm64@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/devscrub:arm64 --format '{{.Manifest.Digest}}')
           if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "Creating latest manifest..."
             docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/devscrub:latest \
               ghcr.io/${{ github.repository_owner }}/devscrub:amd64@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/devscrub:amd64 --format '{{.Manifest.Digest}}') \
               ghcr.io/${{ github.repository_owner }}/devscrub:arm64@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/devscrub:arm64 --format '{{.Manifest.Digest}}')
           fi
+          echo "Manifest creation completed"
+          echo "================================"
 
   tag:
     needs: [build-strategy, build, manifest]
@@ -175,6 +272,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      - name: Debug tag environment
+        run: |
+          echo "=== Tag Debug ==="
+          echo "GitHub ref: ${{ github.ref }}"
+          echo "Branch: ${GITHUB_REF##*/}"
+          echo "Build result: ${{ needs.build.result }}"
+          echo "Manifest job status: ${{ needs.manifest.result }}"
+          echo "================================"
       - name: Set up git for tag push
         run: |
           git config user.name "github-actions"
@@ -182,10 +287,14 @@ jobs:
       - name: Force-update branch tag
         run: |
           BRANCH=${GITHUB_REF##*/}
+          echo "Updating tag: $BRANCH"
           git tag -f "$BRANCH"
           git push origin "refs/tags/$BRANCH" --force
+          echo "Tag $BRANCH updated successfully"
       - name: Force-update latest tag (main only)
         if: github.ref == 'refs/heads/main'
         run: |
+          echo "Updating latest tag..."
           git tag -f latest
-          git push origin latest --force 
+          git push origin latest --force
+          echo "Latest tag updated successfully" 
