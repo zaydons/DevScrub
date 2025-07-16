@@ -51,7 +51,8 @@ RUN apt-get update && \
     curl \
     git \
     docker.io \
-    ca-certificates && \
+    ca-certificates \
+    libstdc++6 && \
     # Create symlinks
     ln -sf /usr/bin/python3.12 /usr/local/bin/python && \
     ln -sf /usr/bin/python3.12 /usr/local/bin/python3 && \

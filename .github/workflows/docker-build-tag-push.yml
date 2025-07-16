@@ -157,6 +157,18 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-${{ github.sha }}-
             ${{ runner.os }}-buildx-
+      - name: Debug build environment
+        run: |
+          echo "🔍 Debugging build environment for platform: ${{ matrix.platform }}"
+          echo "Build args:"
+          echo "  VERSION: ${{ needs.build-strategy.outputs.VERSION }}"
+          echo "  BUILD_DATE: ${{ needs.build-strategy.outputs.BUILD_DATE }}"
+          echo "  GIT_SHA: ${{ needs.build-strategy.outputs.GIT_SHA }}"
+          echo "  GIT_REF: ${{ needs.build-strategy.outputs.GIT_REF }}"
+          echo "Tags: ${{ needs.build-strategy.outputs.tags }}"
+          echo "Platform: ${{ matrix.platform }}"
+          docker version
+          docker buildx version
       - name: Build and push
         id: build
         uses: docker/build-push-action@v5
@@ -175,22 +187,25 @@ jobs:
             GIT_REF=${{ needs.build-strategy.outputs.GIT_REF }}
           provenance: true
           sbom: true
-        continue-on-error: true
       - name: Move cache
         run: |
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
         continue-on-error: true
-      - name: Verify build success
-        if: steps.build.outcome == 'failure'
+      - name: Check build status
+        if: always()
         run: |
-          echo "❌ Build failed for platform: ${{ matrix.platform }}"
-          echo "Check the build logs above for details"
-          exit 1
+          if [ "${{ steps.build.outcome }}" = "failure" ]; then
+            echo "❌ Build failed for platform: ${{ matrix.platform }}"
+            echo "Check the build logs above for details"
+            exit 1
+          else
+            echo "✅ Build completed successfully for platform: ${{ matrix.platform }}"
+          fi
 
   verify:
     needs: [build-strategy, build]
-    if: always() && needs.build.result == 'success'
+    if: always() && needs.build.result != 'failure'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -266,7 +281,7 @@ jobs:
 
   tag:
     needs: [build-strategy, build, manifest]
-    if: always() && needs.build.result == 'success'
+    if: always() && needs.build.result != 'failure'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -307,9 +322,13 @@ jobs:
             echo "✅ Build completed successfully!"
             echo "📦 Images pushed to: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}"
             echo "🏷️  Tags created for version: ${{ needs.build-strategy.outputs.VERSION }}"
-          else
+          elif [ "${{ needs.build.result }}" = "failure" ]; then
             echo "❌ Build failed!"
             echo "Build result: ${{ needs.build.result }}"
-            echo "Verify result: ${{ needs.verify.result }}"
+            echo "Please check the build logs for detailed error information."
             exit 1
+          else
+            echo "⚠️  Build completed with warnings"
+            echo "Build result: ${{ needs.build.result }}"
+            echo "Verify result: ${{ needs.verify.result }}"
           fi 
