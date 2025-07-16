@@ -78,7 +78,7 @@ jobs:
   build:
     needs: [changes, build-strategy]
     if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true'
-    runs-on: ubuntu-latest-4-cores
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         platform: ${{ fromJson(needs.build-strategy.outputs.platforms) }}
