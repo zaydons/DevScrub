@@ -1,4 +1,4 @@
-name: Build, Tag, and Push Docker Image
+name: Secure Build, Tag, and Push Docker Image
 
 on:
   push:
@@ -8,10 +8,244 @@ on:
       - '**.md'
       - 'docs/**'
       - '.gitignore'
+      - 'security-reports/**'
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild all platforms'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: devscrub
+  DOCKER_BUILDKIT: 1
 
 jobs:
+  security-scan:
+    name: Security Analysis
+    runs-on: ubuntu-latest
+    outputs:
+      vulnerabilities: ${{ steps.scan.outputs.vulnerabilities }}
+      sbom: ${{ steps.sbom.outputs.sbom }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+      - name: Generate SBOM
+        id: sbom
+        run: |
+          echo "Generating Software Bill of Materials..."
+          syft packages . -o cyclonedx-json > sbom.json
+          echo "sbom=sbom.json" >> $GITHUB_OUTPUT
+      - name: Check for critical vulnerabilities
+        id: scan
+        run: |
+          if [ -f trivy-results.sarif ]; then
+            VULN_COUNT=$(jq '.runs[0].results | length' trivy-results.sarif 2>/dev/null || echo "0")
+            echo "vulnerabilities=$VULN_COUNT" >> $GITHUB_OUTPUT
+            if [ "$VULN_COUNT" -gt 0 ]; then
+              echo "⚠️ Found $VULN_COUNT vulnerabilities"
+              # Save vulnerability details for issue creation
+              jq '.runs[0].results' trivy-results.sarif > vuln-details.json
+              echo "Vulnerability details saved to vuln-details.json"
+            else
+              echo "✅ No vulnerabilities found"
+            fi
+          else
+            echo "vulnerabilities=0" >> $GITHUB_OUTPUT
+          fi
+
+  create-vulnerability-issue:
+    name: Create Vulnerability Issue
+    needs: security-scan
+    if: |
+      always() && 
+      needs.security-scan.result == 'success' && 
+      needs.security-scan.outputs.vulnerabilities != '0'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create vulnerability issue
+        id: create-issue
+        run: |
+          echo "Creating vulnerability issue..."
+          
+          # Get vulnerability details from the security scan job
+          VULN_COUNT=${{ needs.security-scan.outputs.vulnerabilities }}
+          
+          # Parse vulnerability details from SARIF file
+          if [ -f trivy-results.sarif ]; then
+            VULN_DATA=$(jq '.runs[0].results' trivy-results.sarif)
+          else
+            VULN_DATA="[]"
+          fi
+          
+          # Create issue title
+          ISSUE_TITLE="🚨 Security Vulnerabilities Detected: $VULN_COUNT Critical/High Issues Found"
+          
+          # Create issue body with detailed information
+          ISSUE_BODY="# Security Vulnerability Alert
+          
+          ## Summary
+          **$VULN_COUNT critical/high vulnerabilities** were detected in the latest security scan.
+          
+          **Build Information:**
+          - **Repository:** ${{ github.repository }}
+          - **Branch:** ${{ github.ref_name }}
+          - **Commit:** ${{ github.sha }}
+          - **Scan Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          - **Workflow:** ${{ github.workflow }}
+          - **Run ID:** ${{ github.run_id }}
+          
+          ## Vulnerability Details
+          
+          $(echo "$VULN_DATA" | jq -r '.[] | "### \(.rule.id)\n- **Severity:** \(.level)\n- **Component:** \(.locations[0].physicalLocation.artifactLocation.uri // "Unknown")\n- **Line:** \(.locations[0].physicalLocation.region.startLine // "N/A")\n- **Description:** \(.message.text)\n- **Rule:** \(.rule.id)\n\n---\n"')
+          
+          ## Recommended Actions
+          
+          1. **Immediate Actions:**
+             - [ ] Review all critical vulnerabilities first
+             - [ ] Update vulnerable dependencies
+             - [ ] Apply security patches
+             - [ ] Test fixes in development environment
+          
+          2. **Investigation:**
+             - [ ] Analyze root cause of vulnerabilities
+             - [ ] Check if vulnerabilities are exploitable in production
+             - [ ] Review dependency update impact
+          
+          3. **Remediation:**
+             - [ ] Update package versions
+             - [ ] Apply security patches
+             - [ ] Run security scan after fixes
+             - [ ] Verify fixes resolve vulnerabilities
+          
+          ## Additional Resources
+          
+          - [Full Scan Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - [Security Tab](https://github.com/${{ github.repository }}/security)
+          - [Dependabot Alerts](https://github.com/${{ github.repository }}/security/dependabot)
+          
+          ---
+          
+          *This issue was automatically created by the security scanning workflow. Please address these vulnerabilities promptly to maintain security compliance.*"
+          
+          # Create the issue using GitHub CLI
+          ISSUE_URL=$(gh issue create \
+            --title "$ISSUE_TITLE" \
+            --body "$ISSUE_BODY" \
+            --label "security" \
+            --label "vulnerability" \
+            --label "high-priority" \
+            --assignee "${{ github.actor }}" \
+            --json url \
+            --jq '.url')
+          
+          echo "issue_url=$ISSUE_URL" >> $GITHUB_OUTPUT
+          echo "✅ Vulnerability issue created: $ISSUE_URL"
+          
+          # Add comment to the issue with additional context
+          gh issue comment "$(echo "$ISSUE_URL" | sed 's/.*\///')" \
+            --body "## Additional Context
+            
+            **Workflow Details:**
+            - **Trigger:** ${{ github.event_name }}
+            - **Actor:** ${{ github.actor }}
+            - **Event:** ${{ github.event_name }}
+            
+            **Next Steps:**
+            1. Review the vulnerability details above
+            2. Prioritize critical vulnerabilities
+            3. Create a remediation plan
+            4. Update this issue with progress
+            
+            **Security Best Practices:**
+            - Address critical vulnerabilities within 24 hours
+            - Address high vulnerabilities within 72 hours
+            - Test all fixes before deploying to production
+            - Document remediation steps for future reference"
+
+  close-vulnerability-issues:
+    name: Close Resolved Vulnerability Issues
+    needs: security-scan
+    if: |
+      always() && 
+      needs.security-scan.result == 'success' && 
+      needs.security-scan.outputs.vulnerabilities == '0'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Close resolved vulnerability issues
+        run: |
+          echo "Checking for open vulnerability issues to close..."
+          
+          # Find open issues with vulnerability labels
+          OPEN_ISSUES=$(gh issue list \
+            --label "vulnerability" \
+            --state "open" \
+            --json number,title,url \
+            --jq '.[] | select(.title | contains("Security Vulnerabilities Detected")) | .number')
+          
+          if [ -n "$OPEN_ISSUES" ]; then
+            echo "Found open vulnerability issues: $OPEN_ISSUES"
+            
+            for ISSUE_NUMBER in $OPEN_ISSUES; do
+              echo "Closing issue #$ISSUE_NUMBER"
+              
+              # Add resolution comment
+              gh issue comment "$ISSUE_NUMBER" \
+                --body "## ✅ Vulnerabilities Resolved
+                
+                **Resolution Details:**
+                - **Scan Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+                - **Commit:** ${{ github.sha }}
+                - **Branch:** ${{ github.ref_name }}
+                - **Actor:** ${{ github.actor }}
+                
+                **Status:** All critical and high vulnerabilities have been resolved.
+                
+                **Next Steps:**
+                - [ ] Verify the fix in production
+                - [ ] Monitor for new vulnerabilities
+                - [ ] Update security documentation if needed
+                
+                ---
+                
+                *This issue is being automatically closed as vulnerabilities have been resolved.*"
+              
+              # Close the issue
+              gh issue close "$ISSUE_NUMBER" \
+                --reason "completed" \
+                --delete-branch
+              
+              echo "✅ Issue #$ISSUE_NUMBER closed successfully"
+            done
+          else
+            echo "No open vulnerability issues found to close"
+          fi
+
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -41,26 +275,24 @@ jobs:
 
   build-strategy:
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true'
+    needs: [changes, security-scan]
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || github.event.inputs.force_rebuild == 'true'
     outputs:
       platforms: ${{ steps.strategy.outputs.platforms }}
       tags: ${{ steps.tags.outputs.tags }}
       version: ${{ steps.version.outputs.version }}
+      build_args: ${{ steps.build_args.outputs.build_args }}
     steps:
       - uses: actions/checkout@v4
-      - name: Debug environment
+      - name: Extract version and metadata
+        id: version
         run: |
-          echo "=== Environment Debug Info ==="
-          echo "GitHub Event: ${{ github.event_name }}"
-          echo "GitHub Ref: ${{ github.ref }}"
-          echo "GitHub SHA: ${{ github.sha }}"
-          echo "Repository: ${{ github.repository }}"
-          echo "Actor: ${{ github.actor }}"
-          echo "Runner OS: ${{ runner.os }}"
-          echo "Runner Architecture: ${{ runner.arch }}"
-          echo "================================"
-      - name: Determine build platforms
+          VERSION=$(cat VERSION | tr -d ' \n')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          echo "git_sha=${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "git_ref=${{ github.ref }}" >> $GITHUB_OUTPUT
+      - name: Determine build strategy
         id: strategy
         run: |
           if [[ "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "release" ]]; then
@@ -70,105 +302,75 @@ jobs:
             echo 'platforms=["linux/amd64"]' >> $GITHUB_OUTPUT
             echo "Selected platforms: linux/amd64"
           fi
-      - name: Extract version
-        id: version
-        run: |
-          VERSION=$(cat VERSION | tr -d ' \n')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Extracted version: $VERSION"
       - name: Set Docker tags
         id: tags
         run: |
           BRANCH=${GITHUB_REF##*/}
-          TAGS="ghcr.io/${{ github.repository_owner }}/devscrub:$BRANCH"
+          TAGS="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH"
           if [ "$BRANCH" = "main" ]; then
-            TAGS="$TAGS,ghcr.io/${{ github.repository_owner }}/devscrub:latest"
+            TAGS="$TAGS,${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest"
           fi
           if [ "${{ github.event_name }}" = "release" ]; then
-            TAGS="$TAGS,ghcr.io/${{ github.repository_owner }}/devscrub:${{ steps.version.outputs.version }}"
+            TAGS="$TAGS,${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}"
           fi
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
-          echo "Generated tags: $TAGS"
+      - name: Prepare build arguments
+        id: build_args
+        run: |
+          BUILD_ARGS="VERSION=${{ steps.version.outputs.version }}"
+          BUILD_ARGS="$BUILD_ARGS,BUILD_DATE=${{ steps.build_date }}"
+          BUILD_ARGS="$BUILD_ARGS,GIT_SHA=${{ steps.git_sha }}"
+          BUILD_ARGS="$BUILD_ARGS,GIT_REF=${{ steps.git_ref }}"
+          BUILD_ARGS="$BUILD_ARGS,TARGETPLATFORM=\$TARGETPLATFORM"
+          echo "build_args=$BUILD_ARGS" >> $GITHUB_OUTPUT
 
   build:
-    needs: [changes, build-strategy]
-    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true'
+    needs: [changes, build-strategy, security-scan]
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || github.event.inputs.force_rebuild == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
         platform: ${{ fromJson(needs.build-strategy.outputs.platforms) }}
     permissions:
-      contents: write
+      contents: read
       packages: write
+      security-events: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Debug build environment
-        run: |
-          echo "=== Build Environment Debug ==="
-          echo "Platform: ${{ matrix.platform }}"
-          echo "Tags: ${{ needs.build-strategy.outputs.tags }}"
-          echo "Version: ${{ needs.build-strategy.outputs.version }}"
-          echo "Docker version:"
-          docker --version
-          echo "Available disk space:"
-          df -h
-          echo "Memory info:"
-          free -h
-          echo "================================"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
-        continue-on-error: true
-      - name: Debug QEMU setup
-        if: always()
-        run: |
-          echo "=== QEMU Debug ==="
-          docker run --rm --platform ${{ matrix.platform }} alpine:latest echo "QEMU test successful"
-          echo "================================"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        continue-on-error: true
-      - name: Debug Buildx setup
-        if: always()
-        run: |
-          echo "=== Buildx Debug ==="
-          docker buildx version
-          docker buildx ls
-          echo "================================"
-      - name: Check GitHub Container Registry status
-        run: |
-          echo "=== Registry Status Check ==="
-          echo "Testing registry connectivity..."
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://ghcr.io/v2/ || echo "000")
-          echo "Registry HTTP response code: $HTTP_CODE"
-          if [ "$HTTP_CODE" = "200" ]; then
-            echo "Registry is accessible"
-          else
-            echo "Registry may have issues (HTTP $HTTP_CODE)"
-          fi
-          echo "================================"
-      - name: Log in to GitHub Container Registry
+        with:
+          driver-opts: |
+            image=moby/buildkit:v0.12.0
+      - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-      - name: Debug registry login
-        if: always()
-        run: |
-          echo "=== Registry Login Debug ==="
-          docker info | grep -A 5 "Registry Mirrors" || echo "No registry mirrors configured"
-          echo "================================"
-      - name: Debug Dockerfile
-        run: |
-          echo "=== Dockerfile Debug ==="
-          echo "Dockerfile contents:"
-          head -20 Dockerfile
-          echo "..."
-          tail -10 Dockerfile
-          echo "Dockerfile size: $(wc -l < Dockerfile) lines"
-          echo "================================"
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}-${{ matrix.platform }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ github.sha }}-
+            ${{ runner.os }}-buildx-
       - name: Build and push
         id: build
         uses: docker/build-push-action@v5
@@ -177,49 +379,28 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ needs.build-strategy.outputs.tags }}
-          build-args: |
-            BUILDKIT_INLINE_CACHE=1
-            TARGETPLATFORM=${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          build-args: ${{ needs.build-strategy.outputs.build_args }}
+          provenance: true
+          sbom: true
         continue-on-error: true
-      - name: Debug build output
-        if: always()
+      - name: Move cache
         run: |
-          echo "=== Build Debug ==="
-          echo "Build step outcome: ${{ steps.build.outcome }}"
-          echo "Build step conclusion: ${{ steps.build.conclusion }}"
-          if [ "${{ steps.build.outcome }}" = "failure" ]; then
-            echo "Build failed - checking for error details..."
-            echo "Last 50 lines of build logs would be here in actual failure"
-          else
-            echo "Build appears successful"
-          fi
-          echo "================================"
-      - name: Retry build on failure
-        if: steps.build.outcome == 'failure'
-        uses: docker/build-push-action@v5
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+        continue-on-error: true
+      - name: Scan built image
+        if: steps.build.outcome == 'success'
+        run: |
+          echo "Scanning built image for vulnerabilities..."
+          trivy image --format sarif --output trivy-image-results.sarif ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ matrix.platform }}
+      - name: Upload image scan results
+        if: always() && steps.build.outcome == 'success'
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          push: true
-          tags: ${{ needs.build-strategy.outputs.tags }}
-          build-args: |
-            BUILDKIT_INLINE_CACHE=1
-            TARGETPLATFORM=${{ matrix.platform }}
-        continue-on-error: true
-      - name: Debug retry build
-        if: always() && steps.build.outcome == 'failure'
-        run: |
-          echo "=== Retry Build Debug ==="
-          echo "Retry build completed"
-          echo "================================"
-      - name: Final build status
-        if: always()
-        run: |
-          echo "=== Final Build Status ==="
-          echo "Platform: ${{ matrix.platform }}"
-          echo "Original build outcome: ${{ steps.build.outcome }}"
-          echo "Job status: ${{ job.status }}"
-          echo "================================"
+          sarif_file: 'trivy-image-results.sarif'
 
   manifest:
     needs: [build-strategy, build]
@@ -230,38 +411,52 @@ jobs:
     permissions:
       packages: write
     steps:
-      - name: Debug manifest prerequisites
-        run: |
-          echo "=== Manifest Debug ==="
-          echo "GitHub ref: ${{ github.ref }}"
-          echo "GitHub event: ${{ github.event_name }}"
-          echo "Platforms: ${{ needs.build-strategy.outputs.platforms }}"
-          echo "Build job status: ${{ needs.build.result }}"
-          echo "================================"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Log in to GitHub Container Registry
+      - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create and push manifest
         run: |
-          echo "=== Creating Multi-Arch Manifest ==="
-          echo "Version: ${{ needs.build-strategy.outputs.version }}"
-          echo "Repository: ${{ github.repository_owner }}/devscrub"
-          docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/devscrub:${{ needs.build-strategy.outputs.version }} \
-            ghcr.io/${{ github.repository_owner }}/devscrub:amd64@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/devscrub:amd64 --format '{{.Manifest.Digest}}') \
-            ghcr.io/${{ github.repository_owner }}/devscrub:arm64@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/devscrub:arm64 --format '{{.Manifest.Digest}}')
+          echo "Creating multi-architecture manifest..."
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.build-strategy.outputs.version }} \
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:amd64@$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:amd64 --format '{{.Manifest.Digest}}') \
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:arm64@$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:arm64 --format '{{.Manifest.Digest}}')
           if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "Creating latest manifest..."
-            docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/devscrub:latest \
-              ghcr.io/${{ github.repository_owner }}/devscrub:amd64@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/devscrub:amd64 --format '{{.Manifest.Digest}}') \
-              ghcr.io/${{ github.repository_owner }}/devscrub:arm64@$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/devscrub:arm64 --format '{{.Manifest.Digest}}')
+            docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest \
+              ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:amd64@$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:amd64 --format '{{.Manifest.Digest}}') \
+              ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:arm64@$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:arm64 --format '{{.Manifest.Digest}}')
           fi
-          echo "Manifest creation completed"
-          echo "================================"
+
+  security-report:
+    needs: [security-scan, build]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate security report
+        run: |
+          echo "# Security Scan Report" > security-reports/scan-report.md
+          echo "Generated: $(date -u)" >> security-reports/scan-report.md
+          echo "" >> security-reports/scan-report.md
+          echo "## Vulnerability Summary" >> security-reports/scan-report.md
+          echo "- Total vulnerabilities: ${{ needs.security-scan.outputs.vulnerabilities }}" >> security-reports/scan-report.md
+          echo "- Build status: ${{ needs.build.result }}" >> security-reports/scan-report.md
+          echo "" >> security-reports/scan-report.md
+          echo "## SBOM Information" >> security-reports/scan-report.md
+          echo "- SBOM generated: ${{ needs.security-scan.outputs.sbom }}" >> security-reports/scan-report.md
+      - name: Commit security report
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add security-reports/
+          git commit -m "Update security scan report" || exit 0
+          git push origin ${{ github.ref }}
 
   tag:
     needs: [build-strategy, build, manifest]
@@ -270,31 +465,18 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Debug tag environment
-        run: |
-          echo "=== Tag Debug ==="
-          echo "GitHub ref: ${{ github.ref }}"
-          echo "Branch: ${GITHUB_REF##*/}"
-          echo "Build result: ${{ needs.build.result }}"
-          echo "Manifest job status: ${{ needs.manifest.result }}"
-          echo "================================"
-      - name: Set up git for tag push
+      - uses: actions/checkout@v4
+      - name: Set up git
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-      - name: Force-update branch tag
+      - name: Create tags
         run: |
           BRANCH=${GITHUB_REF##*/}
-          echo "Updating tag: $BRANCH"
+          VERSION=${{ needs.build-strategy.outputs.version }}
           git tag -f "$BRANCH"
-          git push origin "refs/tags/$BRANCH" --force
-          echo "Tag $BRANCH updated successfully"
-      - name: Force-update latest tag (main only)
-        if: github.ref == 'refs/heads/main'
-        run: |
-          echo "Updating latest tag..."
-          git tag -f latest
-          git push origin latest --force
-          echo "Latest tag updated successfully" 
+          git tag -f "v$VERSION"
+          if [ "$BRANCH" = "main" ]; then
+            git tag -f latest
+          fi
+          git push origin --tags --force 
