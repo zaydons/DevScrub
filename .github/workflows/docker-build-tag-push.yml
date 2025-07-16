@@ -101,12 +101,10 @@ jobs:
       - name: Prepare build arguments
         id: build_args
         run: |
-          BUILD_ARGS="VERSION=${{ env.VERSION }}"
-          BUILD_ARGS="$BUILD_ARGS,BUILD_DATE=${{ steps.version.outputs.build_date }}"
-          BUILD_ARGS="$BUILD_ARGS,GIT_SHA=${{ steps.version.outputs.git_sha }}"
-          BUILD_ARGS="$BUILD_ARGS,GIT_REF=${{ steps.version.outputs.git_ref }}"
-          BUILD_ARGS="$BUILD_ARGS,TARGETPLATFORM=\$TARGETPLATFORM"
-          echo "build_args=$BUILD_ARGS" >> $GITHUB_OUTPUT
+          echo "VERSION=${{ env.VERSION }}" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=${{ steps.version.outputs.build_date }}" >> $GITHUB_OUTPUT
+          echo "GIT_SHA=${{ steps.version.outputs.git_sha }}" >> $GITHUB_OUTPUT
+          echo "GIT_REF=${{ steps.version.outputs.git_ref }}" >> $GITHUB_OUTPUT
 
   build:
     needs: [changes, build-strategy]
@@ -165,7 +163,11 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
-          build-args: ${{ needs.build-strategy.outputs.build_args }}
+          build-args: |
+            VERSION=${{ needs.build-strategy.outputs.VERSION }}
+            BUILD_DATE=${{ needs.build-strategy.outputs.BUILD_DATE }}
+            GIT_SHA=${{ needs.build-strategy.outputs.GIT_SHA }}
+            GIT_REF=${{ needs.build-strategy.outputs.GIT_REF }}
           provenance: true
           sbom: true
         continue-on-error: true
@@ -209,17 +211,16 @@ jobs:
           # Pull the built image using the branch tag
           docker pull ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH
           
-          # Test basic functionality
-          docker run --rm ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH python --version
-          docker run --rm ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH node --version
+          # Test basic functionality by overriding entrypoint
+          docker run --rm --entrypoint python ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --version
+          docker run --rm --entrypoint node ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --version
+          docker run --rm --entrypoint npm ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --version
           
           echo "✅ Image verification successful for ${{ matrix.platform }}"
 
   manifest:
     needs: [build-strategy, build]
-    if: |
-      (github.ref == 'refs/heads/main' || github.event_name == 'release') &&
-      (contains(needs.build-strategy.outputs.platforms, 'linux/arm64'))
+    if: github.ref == 'refs/heads/main' || github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -234,14 +235,20 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create and push manifest
         run: |
-          echo "Creating multi-architecture manifest..."
-          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.build-strategy.outputs.version }} \
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:amd64@$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:amd64 --format '{{.Manifest.Digest}}') \
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:arm64@$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:arm64 --format '{{.Manifest.Digest}}')
+          echo "Creating manifest..."
+          BRANCH=${GITHUB_REF##*/}
+          
+          # Get the digest of the built image
+          IMAGE_DIGEST=$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --format '{{.Manifest.Digest}}')
+          
+          # Create manifest for version tag
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.build-strategy.outputs.VERSION }} \
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH@$IMAGE_DIGEST
+          
+          # Create manifest for latest tag if on main branch
           if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
             docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest \
-              ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:amd64@$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:amd64 --format '{{.Manifest.Digest}}') \
-              ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:arm64@$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:arm64 --format '{{.Manifest.Digest}}')
+              ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH@$IMAGE_DIGEST
           fi
 
   tag:
@@ -259,13 +266,26 @@ jobs:
       - name: Create tags
         run: |
           BRANCH=${GITHUB_REF##*/}
-          VERSION=${{ needs.build-strategy.outputs.version }}
-          git tag -f "$BRANCH"
-          git tag -f "v$VERSION"
-          if [ "$BRANCH" = "main" ]; then
-            git tag -f latest
+          VERSION=${{ needs.build-strategy.outputs.VERSION }}
+          
+          # Create tags only if they don't exist or are different
+          if ! git tag -l | grep -q "^$BRANCH$"; then
+            git tag "$BRANCH"
+            echo "Created tag: $BRANCH"
           fi
-          git push origin --tags --force
+          
+          if ! git tag -l | grep -q "^v$VERSION$"; then
+            git tag "v$VERSION"
+            echo "Created tag: v$VERSION"
+          fi
+          
+          if [ "$BRANCH" = "main" ] && ! git tag -l | grep -q "^latest$"; then
+            git tag latest
+            echo "Created tag: latest"
+          fi
+          
+          # Push tags
+          git push origin --tags
 
   notify:
     needs: [build-strategy, build, verify, tag]
@@ -277,7 +297,7 @@ jobs:
           if [ "${{ needs.build.result }}" = "success" ] && [ "${{ needs.verify.result }}" = "success" ]; then
             echo "✅ Build completed successfully!"
             echo "📦 Images pushed to: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}"
-            echo "🏷️  Tags created for version: ${{ needs.build-strategy.outputs.version }}"
+            echo "🏷️  Tags created for version: ${{ needs.build-strategy.outputs.VERSION }}"
           else
             echo "❌ Build failed!"
             echo "Build result: ${{ needs.build.result }}"
