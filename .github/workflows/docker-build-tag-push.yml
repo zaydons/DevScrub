@@ -250,7 +250,7 @@ jobs:
 
   verify:
     needs: [build-strategy, build]
-    if: always() && needs.build.result != 'failure'
+    if: needs.build.result == 'success' && needs.build-strategy.outputs.platforms != ''
     runs-on: ubuntu-latest
     strategy:
       matrix:
