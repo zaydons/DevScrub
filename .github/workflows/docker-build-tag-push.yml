@@ -40,8 +40,19 @@ jobs:
       docker: ${{ steps.filter.outputs.docker }}
       python: ${{ steps.filter.outputs.python }}
       node: ${{ steps.filter.outputs.node }}
+      force_build: ${{ steps.force.outputs.force_build }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check for force-build flag in PR title
+        id: force
+        if: github.event_name == 'pull_request'
+        run: |
+          TITLE="${{ github.event.pull_request.title }}"
+          if [[ "$TITLE" == *"[force-build]"* ]]; then
+            echo "force_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "force_build=false" >> $GITHUB_OUTPUT
+          fi
       - uses: dorny/paths-filter@v2
         id: filter
         with:
@@ -64,12 +75,13 @@ jobs:
   build-strategy:
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || github.event.inputs.force_rebuild == 'true'
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || github.event.inputs.force_rebuild == 'true' || needs.changes.outputs.force_build == 'true'
     outputs:
       platforms: ${{ steps.strategy.outputs.platforms }}
       tags: ${{ steps.tags.outputs.tags }}
       version: ${{ steps.version.outputs.version }}
       build_args: ${{ steps.build_args.outputs.build_args }}
+      force_build: ${{ needs.changes.outputs.force_build }}
     steps:
       - uses: actions/checkout@v4
       - name: Extract version and metadata
@@ -113,7 +125,7 @@ jobs:
 
   build:
     needs: [changes, build-strategy]
-    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || github.event.inputs.force_rebuild == 'true'
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || github.event.inputs.force_rebuild == 'true' || needs.changes.outputs.force_build == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -238,7 +250,7 @@ jobs:
 
   verify:
     needs: [build-strategy, build]
-    if: always() && needs.build.result != 'failure'
+    if: needs.build.result == 'success' && needs.build-strategy.outputs.platforms != ''
     runs-on: ubuntu-latest
     strategy:
       matrix:
