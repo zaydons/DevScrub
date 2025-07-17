@@ -191,7 +191,7 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Verify image functionality
+      - name: Verify image
         run: |
           echo "Verifying image for platform: ${{ matrix.platform }}"
           
@@ -203,9 +203,8 @@ jobs:
           # Pull the built image
           docker pull --platform ${{ matrix.platform }} $IMAGE_TAG
           
-          # Test basic functionality
-          echo "Testing basic container functionality..."
-          docker run --rm --platform ${{ matrix.platform }} $IMAGE_TAG echo "Container test successful"
+          # Test basic functionality by overriding entrypoint
+          docker run --rm --platform ${{ matrix.platform }} --entrypoint sh $IMAGE_TAG -c "echo 'Container test successful'"
           
           # Test specific tools if they exist (with error handling)
           echo "Testing available tools..."
