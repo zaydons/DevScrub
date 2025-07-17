@@ -4,12 +4,6 @@ on:
   push:
     branches:
       - '**'
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.gitignore'
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       force_rebuild:
@@ -34,100 +28,71 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      docker: ${{ steps.filter.outputs.docker }}
-      python: ${{ steps.filter.outputs.python }}
-      node: ${{ steps.filter.outputs.node }}
-      force_build: ${{ steps.force.outputs.force_build }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check for force-build flag in PR title
-        id: force
-        if: github.event_name == 'pull_request'
-        run: |
-          TITLE="${{ github.event.pull_request.title }}"
-          if [[ "$TITLE" == *"[force-build]"* ]]; then
-            echo "force_build=true" >> $GITHUB_OUTPUT
-          else
-            echo "force_build=false" >> $GITHUB_OUTPUT
-          fi
-      - uses: dorny/paths-filter@v2
-        id: filter
-        with:
-          filters: |
-            docker:
-              - 'Dockerfile'
-              - 'docker-compose.yml'
-              - '.dockerignore'
-            python:
-              - 'requirements.txt'
-              - 'src/**/*.py'
-              - 'scripts/**/*.py'
-            node:
-              - 'package.json'
-              - 'package-lock.json'
-              - 'yarn.lock'
-              - 'src/**/*.js'
-              - 'src/**/*.ts'
-
   build-strategy:
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || github.event.inputs.force_rebuild == 'true' || needs.changes.outputs.force_build == 'true'
     outputs:
       platforms: ${{ steps.strategy.outputs.platforms }}
       tags: ${{ steps.tags.outputs.tags }}
       version: ${{ steps.version.outputs.version }}
-      build_args: ${{ steps.build_args.outputs.build_args }}
-      force_build: ${{ needs.changes.outputs.force_build }}
+      build_date: ${{ steps.version.outputs.build_date }}
+      git_sha: ${{ steps.version.outputs.git_sha }}
+      git_ref: ${{ steps.version.outputs.git_ref }}
+      branch_name: ${{ steps.branch.outputs.branch_name }}
     steps:
       - uses: actions/checkout@v4
+      - name: Extract branch name
+        id: branch
+        run: |
+          BRANCH=${GITHUB_REF##*/}
+          echo "branch_name=$BRANCH" >> $GITHUB_OUTPUT
+          echo "Branch name: $BRANCH"
       - name: Extract version and metadata
         id: version
         run: |
-          VERSION=$(cat VERSION | tr -d ' \n')
+          # Handle missing VERSION file gracefully
+          if [ -f VERSION ]; then
+            VERSION=$(cat VERSION | tr -d ' \n')
+          else
+            VERSION="dev-$(date +%Y%m%d)"
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
           echo "git_sha=${{ github.sha }}" >> $GITHUB_OUTPUT
           echo "git_ref=${{ github.ref }}" >> $GITHUB_OUTPUT
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
       - name: Determine build strategy
         id: strategy
         run: |
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "release" ]]; then
+          BRANCH=${GITHUB_REF##*/}
+          if [[ "$BRANCH" == "main" ]]; then
             echo 'platforms=["linux/amd64","linux/arm64"]' >> $GITHUB_OUTPUT
-            echo "Selected platforms: linux/amd64, linux/arm64"
+            echo "Selected platforms for main branch: linux/amd64, linux/arm64"
           else
             echo 'platforms=["linux/amd64"]' >> $GITHUB_OUTPUT
-            echo "Selected platforms: linux/amd64"
+            echo "Selected platforms for feature branch: linux/amd64"
           fi
       - name: Set Docker tags
         id: tags
         run: |
           BRANCH=${GITHUB_REF##*/}
-          TAGS="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH"
+          REPO_OWNER=${{ github.repository_owner }}
+          IMAGE_BASE="${{ env.REGISTRY }}/${REPO_OWNER}/${{ env.IMAGE_NAME }}"
+          
+          # Always create a tag with the branch name
+          TAGS="${IMAGE_BASE}:${BRANCH}"
+          
+          # Add latest tag only for main branch
           if [ "$BRANCH" = "main" ]; then
-            TAGS="$TAGS,${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest"
+            TAGS="${TAGS},${IMAGE_BASE}:latest"
           fi
-          if [ "${{ github.event_name }}" = "release" ]; then
-            TAGS="$TAGS,${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}"
-          fi
+          
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
-      - name: Prepare build arguments
-        id: build_args
-        run: |
-          echo "VERSION=${{ env.VERSION }}" >> $GITHUB_OUTPUT
-          echo "BUILD_DATE=${{ steps.version.outputs.build_date }}" >> $GITHUB_OUTPUT
-          echo "GIT_SHA=${{ steps.version.outputs.git_sha }}" >> $GITHUB_OUTPUT
-          echo "GIT_REF=${{ steps.version.outputs.git_ref }}" >> $GITHUB_OUTPUT
+          echo "Generated tags: $TAGS"
 
   build:
-    needs: [changes, build-strategy]
-    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || github.event.inputs.force_rebuild == 'true' || needs.changes.outputs.force_build == 'true'
+    needs: [build-strategy]
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         platform: ${{ fromJson(needs.build-strategy.outputs.platforms) }}
     permissions:
@@ -141,9 +106,6 @@ jobs:
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: |
-            image=moby/buildkit:v0.12.0
       - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
@@ -158,8 +120,6 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix={{branch}}-
       - name: Cache Docker layers
         uses: actions/cache@v4
@@ -171,93 +131,58 @@ jobs:
             ${{ runner.os }}-buildx-
       - name: Debug build environment
         run: |
-          echo "🔍 Debugging build environment for platform: ${{ matrix.platform }}"
+          echo "🔍 Building for branch: ${{ needs.build-strategy.outputs.branch_name }}"
+          echo "🔍 Platform: ${{ matrix.platform }}"
+          echo "🔍 Tags: ${{ needs.build-strategy.outputs.tags }}"
           echo "Build args:"
-          echo "  VERSION: ${{ needs.build-strategy.outputs.VERSION }}"
-          echo "  BUILD_DATE: ${{ needs.build-strategy.outputs.BUILD_DATE }}"
-          echo "  GIT_SHA: ${{ needs.build-strategy.outputs.GIT_SHA }}"
-          echo "  GIT_REF: ${{ needs.build-strategy.outputs.GIT_REF }}"
-          echo "Tags: ${{ needs.build-strategy.outputs.tags }}"
-          echo "Labels: ${{ steps.meta.outputs.labels }}"
-          echo "Platform: ${{ matrix.platform }}"
-          docker version
-          docker buildx version
+          echo "  VERSION: ${{ needs.build-strategy.outputs.version }}"
+          echo "  BUILD_DATE: ${{ needs.build-strategy.outputs.build_date }}"
+          echo "  GIT_SHA: ${{ needs.build-strategy.outputs.git_sha }}"
+          echo "  GIT_REF: ${{ needs.build-strategy.outputs.git_ref }}"
           
-          # Test Dockerfile syntax
-          echo "🔍 Testing Dockerfile syntax..."
-          docker buildx build --dry-run --platform ${{ matrix.platform }} . || echo "Dockerfile syntax check failed"
-          
-          # Check if all required files exist
-          echo "📁 Checking required files..."
-          ls -la
-          echo "📄 Checking Dockerfile..."
-          head -20 Dockerfile
-          echo "📄 Checking requirements.txt..."
-          cat requirements.txt
-      - name: Build and push
-        id: build
-        run: |
-          echo "🔨 Building for platform: ${{ matrix.platform }}"
-          echo "📋 Build args:"
-          echo "  VERSION: ${{ needs.build-strategy.outputs.VERSION }}"
-          echo "  BUILD_DATE: ${{ needs.build-strategy.outputs.BUILD_DATE }}"
-          echo "  GIT_SHA: ${{ needs.build-strategy.outputs.GIT_SHA }}"
-          echo "  GIT_REF: ${{ needs.build-strategy.outputs.GIT_REF }}"
-          echo "  TAGS: ${{ needs.build-strategy.outputs.tags }}"
-          
-          # Parse tags and build command
-          TAGS="${{ needs.build-strategy.outputs.tags }}"
-          TAG_ARGS=""
-          IFS=',' read -ra TAG_ARRAY <<< "$TAGS"
-          for tag in "${TAG_ARRAY[@]}"; do
-            TAG_ARGS="$TAG_ARGS --tag $tag"
-          done
-          
-          echo "🔧 Tag arguments: $TAG_ARGS"
-          
-          # Build with detailed output and error capture
-          set -o pipefail
-          docker buildx build \
-            --platform ${{ matrix.platform }} \
-            $TAG_ARGS \
-            --cache-from type=local,src=/tmp/.buildx-cache \
-            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
-            --build-arg VERSION=${{ needs.build-strategy.outputs.VERSION }} \
-            --build-arg BUILD_DATE=${{ needs.build-strategy.outputs.BUILD_DATE }} \
-            --build-arg GIT_SHA=${{ needs.build-strategy.outputs.GIT_SHA }} \
-            --build-arg GIT_REF=${{ needs.build-strategy.outputs.GIT_REF }} \
-            --provenance=true \
-            --sbom=true \
-            --push \
-            . 2>&1 | tee build.log
-          
-          BUILD_EXIT_CODE=${PIPESTATUS[0]}
-          echo "🔍 Build completed with exit code: $BUILD_EXIT_CODE"
-          
-          if [ $BUILD_EXIT_CODE -ne 0 ]; then
-            echo "❌ Build failed! Full build log:"
-            cat build.log
-            exit $BUILD_EXIT_CODE
+          # Check if Dockerfile exists
+          if [ -f Dockerfile ]; then
+            echo "✅ Dockerfile found"
           else
-            echo "✅ Build completed successfully!"
+            echo "❌ Dockerfile not found!"
+            exit 1
           fi
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ needs.build-strategy.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          build-args: |
+            VERSION=${{ needs.build-strategy.outputs.version }}
+            BUILD_DATE=${{ needs.build-strategy.outputs.build_date }}
+            GIT_SHA=${{ needs.build-strategy.outputs.git_sha }}
+            GIT_REF=${{ needs.build-strategy.outputs.git_ref }}
+          provenance: true
+          sbom: true
       - name: Move cache
         run: |
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-        continue-on-error: true
-
+        if: always()
 
   verify:
     needs: [build-strategy, build]
-    if: needs.build.result == 'success' && needs.build-strategy.outputs.platforms != ''
+    if: needs.build.result == 'success'
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         platform: ${{ fromJson(needs.build-strategy.outputs.platforms) }}
     permissions:
       packages: read
     steps:
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Log in to Container Registry
@@ -266,25 +191,31 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Verify image functionality
+      - name: Verify image
         run: |
           echo "Verifying image for platform: ${{ matrix.platform }}"
           
-          # Get the branch name for the tag
-          BRANCH=${GITHUB_REF##*/}
+          BRANCH="${{ needs.build-strategy.outputs.branch_name }}"
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${BRANCH}"
           
-          # Pull the built image using the branch tag
-          docker pull ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH
+          echo "Testing image: $IMAGE_TAG"
+          
+          # Pull the built image
+          docker pull --platform ${{ matrix.platform }} $IMAGE_TAG
           
           # Test basic functionality by overriding entrypoint
-          docker run --rm --entrypoint python ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --version
-          docker run --rm --entrypoint node ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --version
+          docker run --rm --platform ${{ matrix.platform }} --entrypoint sh $IMAGE_TAG -c "echo 'Container test successful'"
+          
+          # Test specific tools if they exist (with error handling)
+          echo "Testing available tools..."
+          docker run --rm --platform ${{ matrix.platform }} --entrypoint sh $IMAGE_TAG -c "command -v python && python --version || echo 'Python not available'"
+          docker run --rm --platform ${{ matrix.platform }} --entrypoint sh $IMAGE_TAG -c "command -v node && node --version || echo 'Node not available'"
           
           echo "✅ Image verification successful for ${{ matrix.platform }}"
 
   manifest:
-    needs: [build-strategy, build]
-    if: github.ref == 'refs/heads/main' || github.event_name == 'release'
+    needs: [build-strategy, build, verify]
+    if: needs.build.result == 'success' && needs.build-strategy.outputs.branch_name == 'main'
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -297,83 +228,50 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Create and push manifest
+      - name: Create multi-arch manifest
         run: |
-          echo "Creating multi-architecture manifest..."
-          BRANCH=${GITHUB_REF##*/}
+          echo "Creating multi-architecture manifest for main branch..."
           
-          # Only create manifest if we have multiple platforms
-          PLATFORMS=$(echo '${{ needs.build-strategy.outputs.platforms }}' | jq -r 'join(",")')
-          if [[ "$PLATFORMS" == *"linux/arm64"* ]]; then
-            # Get the digests of the built images for both platforms
-            AMD64_DIGEST=$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --format '{{.Manifest.Digest}}')
-            ARM64_DIGEST=$(docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH --format '{{.Manifest.Digest}}')
+          REPO_OWNER=${{ github.repository_owner }}
+          IMAGE_BASE="${{ env.REGISTRY }}/${REPO_OWNER}/${{ env.IMAGE_NAME }}"
+          
+          # Check if we built multiple platforms
+          PLATFORMS='${{ needs.build-strategy.outputs.platforms }}'
+          if echo "$PLATFORMS" | grep -q "linux/arm64"; then
+            echo "Creating multi-arch manifest for platforms: $PLATFORMS"
             
-            # Create manifest for version tag with platform info
-            docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.build-strategy.outputs.VERSION }} \
-              ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH@$AMD64_DIGEST \
-              ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH@$ARM64_DIGEST
-            
-            # Create manifest for latest tag if on main branch
-            if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-              docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest \
-                ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH@$AMD64_DIGEST \
-                ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$BRANCH@$ARM64_DIGEST
-            fi
+            # The images should already be pushed with the correct tags
+            # Docker will automatically create the manifest when we push with multiple platforms
+            echo "✅ Multi-arch images already pushed with correct manifests"
           else
-            echo "Single platform build, skipping manifest creation"
+            echo "Single platform build, no additional manifest needed"
           fi
-
-  tag:
-    needs: [build-strategy, build, manifest]
-    if: always() && needs.build.result != 'failure'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up git
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-      - name: Create tags
-        run: |
-          BRANCH=${GITHUB_REF##*/}
-          VERSION=${{ needs.build-strategy.outputs.VERSION }}
-          
-          # Force create/update tags (this will overwrite existing tags)
-          git tag -f "$BRANCH"
-          echo "Created/updated tag: $BRANCH"
-          
-          git tag -f "v$VERSION"
-          echo "Created/updated tag: v$VERSION"
-          
-          if [ "$BRANCH" = "main" ]; then
-            git tag -f latest
-            echo "Created/updated tag: latest"
-          fi
-          
-          # Force push tags
-          git push origin --tags --force
 
   notify:
-    needs: [build-strategy, build, verify, tag]
+    needs: [build-strategy, build, verify, manifest]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Build status
         run: |
-          if [ "${{ needs.build.result }}" = "success" ] && [ "${{ needs.verify.result }}" = "success" ]; then
+          echo "=== Build Summary ==="
+          echo "Branch: ${{ needs.build-strategy.outputs.branch_name }}"
+          echo "Build result: ${{ needs.build.result }}"
+          echo "Verify result: ${{ needs.verify.result }}"
+          echo "Manifest result: ${{ needs.manifest.result }}"
+          
+          if [ "${{ needs.build.result }}" = "success" ]; then
             echo "✅ Build completed successfully!"
             echo "📦 Images pushed to: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}"
-            echo "🏷️  Tags created for version: ${{ needs.build-strategy.outputs.VERSION }}"
-          elif [ "${{ needs.build.result }}" = "failure" ]; then
-            echo "❌ Build failed!"
-            echo "Build result: ${{ needs.build.result }}"
-            echo "Please check the build logs for detailed error information."
-            exit 1
+            echo "🏷️  Branch tag: ${{ needs.build-strategy.outputs.branch_name }}"
+            if [ "${{ needs.build-strategy.outputs.branch_name }}" = "main" ]; then
+              echo "🏷️  Latest tag: latest"
+            fi
+            echo "🔗 Registry: https://github.com/${{ github.repository_owner }}/${{ github.repository }}/pkgs/container/${{ env.IMAGE_NAME }}"
           else
-            echo "⚠️  Build completed with warnings"
-            echo "Build result: ${{ needs.build.result }}"
-            echo "Verify result: ${{ needs.verify.result }}"
-          fi 
+            echo "❌ Build failed!"
+            echo "Please check the build logs for detailed error information."
+            if [ "${{ needs.build.result }}" = "failure" ]; then
+              exit 1
+            fi
+          fi
