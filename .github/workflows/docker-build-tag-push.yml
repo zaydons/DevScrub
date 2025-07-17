@@ -193,11 +193,21 @@ jobs:
           echo "  GIT_REF: ${{ needs.build-strategy.outputs.GIT_REF }}"
           echo "  TAGS: ${{ needs.build-strategy.outputs.tags }}"
           
+          # Parse tags and build command
+          TAGS="${{ needs.build-strategy.outputs.tags }}"
+          TAG_ARGS=""
+          IFS=',' read -ra TAG_ARRAY <<< "$TAGS"
+          for tag in "${TAG_ARRAY[@]}"; do
+            TAG_ARGS="$TAG_ARGS --tag $tag"
+          done
+          
+          echo "🔧 Tag arguments: $TAG_ARGS"
+          
           # Build with detailed output and error capture
           set -o pipefail
           docker buildx build \
             --platform ${{ matrix.platform }} \
-            --tag ${{ needs.build-strategy.outputs.tags }} \
+            $TAG_ARGS \
             --cache-from type=local,src=/tmp/.buildx-cache \
             --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
             --build-arg VERSION=${{ needs.build-strategy.outputs.VERSION }} \
