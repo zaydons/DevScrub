@@ -91,13 +91,6 @@ jobs:
   build:
     needs: [build-strategy]
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: ${{ fromJson(needs.build-strategy.outputs.platforms) }}
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -112,7 +105,7 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Extract metadata
+      - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -121,26 +114,14 @@ jobs:
             type=ref,event=branch
             type=ref,event=pr
             type=sha,prefix={{branch}}-
-      - name: Cache Docker layers
-        uses: actions/cache@v4
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}-${{ matrix.platform }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-${{ github.sha }}-
-            ${{ runner.os }}-buildx-
       - name: Debug build environment
         run: |
           echo "🔍 Building for branch: ${{ needs.build-strategy.outputs.branch_name }}"
-          echo "🔍 Platform: ${{ matrix.platform }}"
           echo "🔍 Tags: ${{ needs.build-strategy.outputs.tags }}"
-          echo "Build args:"
           echo "  VERSION: ${{ needs.build-strategy.outputs.version }}"
           echo "  BUILD_DATE: ${{ needs.build-strategy.outputs.build_date }}"
           echo "  GIT_SHA: ${{ needs.build-strategy.outputs.git_sha }}"
           echo "  GIT_REF: ${{ needs.build-strategy.outputs.git_ref }}"
-          
-          # Check if Dockerfile exists
           if [ -f Dockerfile ]; then
             echo "✅ Dockerfile found"
           else
@@ -151,12 +132,10 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: ${{ matrix.platform }}
+          platforms: ${{ join(fromJson(needs.build-strategy.outputs.platforms), ',') }}
           push: true
           tags: ${{ needs.build-strategy.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
           build-args: |
             VERSION=${{ needs.build-strategy.outputs.version }}
             BUILD_DATE=${{ needs.build-strategy.outputs.build_date }}
@@ -164,11 +143,6 @@ jobs:
             GIT_REF=${{ needs.build-strategy.outputs.git_ref }}
           provenance: true
           sbom: true
-      - name: Move cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-        if: always()
 
   verify:
     needs: [build-strategy, build]
