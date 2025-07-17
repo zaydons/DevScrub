@@ -132,7 +132,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: ${{ needs.build-strategy.outputs.platforms }}
+          platforms: ${{ join(fromJson(needs.build-strategy.outputs.platforms), ',') }}
           push: true
           tags: ${{ needs.build-strategy.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
