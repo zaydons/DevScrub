@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   build-strategy:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       platforms: ${{ steps.strategy.outputs.platforms }}
       tags: ${{ steps.tags.outputs.tags }}
@@ -90,7 +90,7 @@ jobs:
 
   build:
     needs: [build-strategy]
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
         with:
@@ -147,7 +147,7 @@ jobs:
   verify:
     needs: [build-strategy, build]
     if: needs.build.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     strategy:
       fail-fast: false
       matrix:
@@ -190,7 +190,7 @@ jobs:
   manifest:
     needs: [build-strategy, build, verify]
     if: needs.build.result == 'success' && needs.build-strategy.outputs.branch_name == 'main'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       packages: write
     steps:
@@ -224,7 +224,7 @@ jobs:
   notify:
     needs: [build-strategy, build, verify, manifest]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Build status
         run: |
